@@ -1,0 +1,17 @@
+STEP 3 - Speed + logs (frontend only, backend: no change). Apply on top of your current project.
+
+No npm install needed. Copy these 8 files to the SAME paths (overwrite):
+
+src/api/client.ts                          [API] timing log in fetchWithTimeout; removed unused getClientCredentialsToken + getGpsGatewayUrl
+src/services/tripService.ts                My Trip reuses shared caches (fewer calls); big JSON logs removed
+src/services/notificationService.ts        enrichNotifications exported + [notifications] log
+src/services/notificationWatcher.ts        30 s poll = light list, text lookups only for NEW items
+src/services/driverDashboardService.ts     removed unused getDriverDashboard
+src/screens/DriverTripHistoryScreen.tsx    uses the shared dispatch list; big JSON logs removed
+src/screens/DriverProfileScreen.tsx        stats list reused up to 60 s
+src/navigation/AppNavigator.tsx            30 s poll skipped while app is in background (1 small edit)
+
+Then:  npm run typecheck     and build:  eas build -p android --profile preview
+
+Watch the logs (one tag each):
+  adb logcat -s ReactNativeJS:V | grep -E "\[API\]|\[TRIP\]|\[HISTORY\]|\[notif-watch\]|\[notifications\]|\[dispatches\]"

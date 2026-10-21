@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "129431362683",
+    "project_id": "fuji-mobile-app",
+    "storage_bucket": "fuji-mobile-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:129431362683:android:2112638e35a24bb159d6de",
+        "android_client_info": {
+          "package_name": "com.fujisilvertech.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCYvGt-zQ-Xdb6qEKAMqawQfQXaLFfLOrk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,20 @@
+STEP 2 - React Query. Apply AFTER the step-1 zip (frontend_changed_files.zip).
+
+1) In the project folder run once:   npm install @tanstack/react-query
+   (JavaScript only, no native code, no prebuild needed)
+
+2) Copy these 12 files to the SAME paths (overwrite; src/query/queryClient.ts is NEW):
+
+App.tsx                                       QueryClientProvider around the app
+src/query/queryClient.ts                      NEW  shared cache, query keys, helpers
+src/services/driverDashboardService.ts        dispatch list now shared through the cache
+src/services/driverGpsService.ts              active dispatch now shared through the cache (replaces step-1 version)
+src/services/sessionStorage.ts                clears the cache on logout
+src/screens/DriverDashboardScreen.tsx         useQuery: poll only in transit + foreground, instant paint
+src/screens/MyTripScreen.tsx                  cached + instant paint
+src/screens/DriverTripHistoryScreen.tsx       cached + instant paint
+src/screens/DriverProfileScreen.tsx           cached + instant paint
+src/screens/NotificationsScreen.tsx           cached + instant paint, read state kept in cache
+src/screens/ActivityScreen.tsx                cached + instant paint
+
+3) Build:  eas build -p android --profile preview      Backend: no change.

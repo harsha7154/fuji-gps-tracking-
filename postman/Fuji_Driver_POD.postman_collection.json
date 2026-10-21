@@ -1,0 +1,812 @@
+{
+  "info": {
+    "name": "Fuji Driver - Journey & POD API",
+    "description": "Driver app flow: OTP login -> dispatch -> start journey -> live GPS -> POD photo upload -> complete journey.\n\nServer uses a self-signed certificate: turn OFF 'SSL certificate verification' in Postman Settings > General.\n\nRun 1 Auth first (sets accessToken). Set objectEntryId / dispatchId in collection variables (or let 2.1 Active dispatch fill them).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://13.233.171.171:8443"
+    },
+    {
+      "key": "mobileNumber",
+      "value": ""
+    },
+    {
+      "key": "otp",
+      "value": ""
+    },
+    {
+      "key": "verificationToken",
+      "value": ""
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "userId",
+      "value": ""
+    },
+    {
+      "key": "objectEntryId",
+      "value": ""
+    },
+    {
+      "key": "dispatchId",
+      "value": ""
+    },
+    {
+      "key": "deviceID",
+      "value": "postman-test-device"
+    },
+    {
+      "key": "siteLat",
+      "value": "17.4950"
+    },
+    {
+      "key": "siteLng",
+      "value": "78.3564"
+    },
+    {
+      "key": "podImageBase64",
+      "value": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAARCAAgACADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDAooor60+NCiiigAooooAKKKKAP//Z"
+    }
+  ],
+  "item": [
+    {
+      "name": "1 Auth",
+      "item": [
+        {
+          "name": "1.1 Send OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test(\"success\", () => pm.expect(j.success).to.not.eql(false));",
+                  "if (j.verificationToken) pm.collectionVariables.set(\"verificationToken\", j.verificationToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/mobile-auth/send-otp",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "mobile-auth",
+                "send-otp"
+              ],
+              "query": []
+            },
+            "description": "Set mobileNumber first. Saves verificationToken.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mobileNumber\": \"{{mobileNumber}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "1.2 Verify OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test(\"has access_token\", () => pm.expect(j.access_token).to.be.a(\"string\"));",
+                  "pm.collectionVariables.set(\"accessToken\", j.access_token);",
+                  "if (j.user && j.user.userId) pm.collectionVariables.set(\"userId\", j.user.userId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/mobile-auth/verify-otp",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "mobile-auth",
+                "verify-otp"
+              ],
+              "query": []
+            },
+            "description": "Set otp (from SMS) first. Saves accessToken + userId.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"verificationToken\": \"{{verificationToken}}\",\n  \"otp\": \"{{otp}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 Dispatch",
+      "item": [
+        {
+          "name": "2.1 Driver active dispatch",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "const d = j.dispatch || j.data || j;",
+                  "if (d && d.objectEntryId) pm.collectionVariables.set(\"objectEntryId\", String(d.objectEntryId));",
+                  "if (d && (d.dispatchId || d.dispatchID)) pm.collectionVariables.set(\"dispatchId\", d.dispatchId || d.dispatchID);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/driver/active-dispatch?userId={{userId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "driver",
+                "active-dispatch"
+              ],
+              "query": [
+                {
+                  "key": "userId",
+                  "value": "{{userId}}"
+                }
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "2.2 Driver dispatches",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/dispatches",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "dispatches"
+              ],
+              "query": []
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "2.3 Dispatch detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "console.log(\"destinationPin:\", j.destinationPin || (j.data && j.data.destinationPin));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/dispatch/{{objectEntryId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "dispatch",
+                "{{objectEntryId}}"
+              ],
+              "query": []
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 Journey",
+      "item": [
+        {
+          "name": "3.1 Start journey",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/start-journey?objectEntryId={{objectEntryId}}&deviceID={{deviceID}}&liveGPS={{siteLat}},{{siteLng}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "start-journey"
+              ],
+              "query": [
+                {
+                  "key": "objectEntryId",
+                  "value": "{{objectEntryId}}"
+                },
+                {
+                  "key": "deviceID",
+                  "value": "{{deviceID}}"
+                },
+                {
+                  "key": "liveGPS",
+                  "value": "{{siteLat}},{{siteLng}}"
+                }
+              ]
+            },
+            "description": "Status Dispatched -> In Transit. liveGPS = current phone location 'lat,lng'."
+          }
+        },
+        {
+          "name": "3.2 Live GPS (Redis)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/gps/live?dispatchId={{dispatchId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "gps",
+                "live"
+              ],
+              "query": [
+                {
+                  "key": "dispatchId",
+                  "value": "{{dispatchId}}"
+                }
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 Proof of Delivery",
+      "item": [
+        {
+          "name": "4.1 Upload POD photo",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test(\"success true\", () => pm.expect(j.success).to.eql(true));",
+                  "pm.test(\"has podFileEntryId\", () => pm.expect(j.podFileEntryId).to.be.above(0));",
+                  "pm.collectionVariables.set(\"podFileEntryId\", String(j.podFileEntryId));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/pod/photo?objectEntryId={{objectEntryId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "pod",
+                "photo"
+              ],
+              "query": [
+                {
+                  "key": "objectEntryId",
+                  "value": "{{objectEntryId}}"
+                }
+              ]
+            },
+            "description": "podImageBase64 holds a small sample JPEG (32x32). Replace it with a real photo's base64 if needed (JPEG/PNG, max 8 MB). Journey must be started (status not Dispatched).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"podImageBase64\": \"{{podImageBase64}}\",\n  \"podImageFileName\": \"pod_{{dispatchId}}.jpg\",\n  \"podImageMimeType\": \"image/jpeg\",\n  \"podImageCapturedAt\": {{$timestamp}}000,\n  \"podImageLatitude\": {{siteLat}},\n  \"podImageLongitude\": {{siteLng}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.2 Upload POD - missing photo (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"POD_PHOTO_REQUIRED\", () => pm.expect(pm.response.json().code).to.eql(\"POD_PHOTO_REQUIRED\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/pod/photo?objectEntryId={{objectEntryId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "pod",
+                "photo"
+              ],
+              "query": [
+                {
+                  "key": "objectEntryId",
+                  "value": "{{objectEntryId}}"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"podImageFileName\": \"empty.jpg\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.3 Upload POD - not an image (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"POD_PHOTO_INVALID\", () => pm.expect(pm.response.json().code).to.eql(\"POD_PHOTO_INVALID\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/pod/photo?objectEntryId={{objectEntryId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "pod",
+                "photo"
+              ],
+              "query": [
+                {
+                  "key": "objectEntryId",
+                  "value": "{{objectEntryId}}"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"podImageBase64\": \"aGVsbG8gd29ybGQ=\",\n  \"podImageFileName\": \"bad.jpg\",\n  \"podImageMimeType\": \"image/jpeg\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.4 Upload POD - no token (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 401/403\", () => pm.expect(pm.response.code).to.be.oneOf([401,403]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/pod/photo?objectEntryId={{objectEntryId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "pod",
+                "photo"
+              ],
+              "query": [
+                {
+                  "key": "objectEntryId",
+                  "value": "{{objectEntryId}}"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"podImageBase64\": \"{{podImageBase64}}\",\n  \"podImageFileName\": \"pod_{{dispatchId}}.jpg\",\n  \"podImageMimeType\": \"image/jpeg\",\n  \"podImageCapturedAt\": {{$timestamp}}000,\n  \"podImageLatitude\": {{siteLat}},\n  \"podImageLongitude\": {{siteLng}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.5 Upload POD - unknown dispatch (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 404\", () => pm.response.to.have.status(404));",
+                  "pm.test(\"DISPATCH_NOT_FOUND\", () => pm.expect(pm.response.json().code).to.eql(\"DISPATCH_NOT_FOUND\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/pod/photo?objectEntryId=999999999",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "pod",
+                "photo"
+              ],
+              "query": [
+                {
+                  "key": "objectEntryId",
+                  "value": "999999999"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"podImageBase64\": \"{{podImageBase64}}\",\n  \"podImageFileName\": \"pod_{{dispatchId}}.jpg\",\n  \"podImageMimeType\": \"image/jpeg\",\n  \"podImageCapturedAt\": {{$timestamp}}000,\n  \"podImageLatitude\": {{siteLat}},\n  \"podImageLongitude\": {{siteLng}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "4.6 Complete journey",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/complete-journey?objectEntryId={{objectEntryId}}&deviceID={{deviceID}}&liveGPS={{siteLat}},{{siteLng}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "complete-journey"
+              ],
+              "query": [
+                {
+                  "key": "objectEntryId",
+                  "value": "{{objectEntryId}}"
+                },
+                {
+                  "key": "deviceID",
+                  "value": "{{deviceID}}"
+                },
+                {
+                  "key": "liveGPS",
+                  "value": "{{siteLat}},{{siteLng}}"
+                }
+              ]
+            },
+            "description": "Call after 4.1. Server refuses if liveGPS is more than 100 m from the site. Sets status Arrived."
+          }
+        },
+        {
+          "name": "4.7 Dispatch history",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/o/material-dispatch-rest/history/{{dispatchId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "o",
+                "material-dispatch-rest",
+                "history",
+                "{{dispatchId}}"
+              ],
+              "query": []
+            },
+            "description": ""
+          }
+        }
+      ]
+    }
+  ]
+}
