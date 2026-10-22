@@ -155,7 +155,10 @@ export class RouteTracker {
       ready: true,
       gray: this.gray.filter((segment) => segment.length > 1),
       blue: this.blue,
-      truck: this.pos,
+      // The truck is drawn only from live GPS (ws/gps/live); the stored history from
+      // Liferay draws the travelled line but never places the truck. After arrival the
+      // final picture shows it at the site.
+      truck: this.live || this.arrived ? this.pos : null,
       heading: this.heading,
       live: this.live,
       remainingM,

@@ -32,9 +32,6 @@ import { colors, radius, spacing, typography } from '../theme';
 // callback (see the comment above watchPositionAsync below).
 const MAX_FIX_AGE_MS = 8000;
 
-// How often we read the Redis live state (GET /o/gps/live) for server-side arrival / distance.
-const LIVE_STATUS_POLL_INTERVAL_MS = 5000;
-
 // A hung server must never leave the screen on "Loading dispatch..." for minutes.
 const LOAD_DEADLINE_MS = 20_000;
 
@@ -76,18 +73,19 @@ const ARRIVAL_REPROMPT_MS = 10_000;
 // A position read back from the GPS service older than this is not shown as live
 // (same 2 minutes as the web tracker's "signal lost").
 const SERVER_LIVE_STALE_MS = 120000;
+/** GPS service unreachable when the screen opened: ask its /health again this often. */
+const LIVE_HEALTH_RETRY_MS = 15000;
 
 interface ServerLivePosition {
   coord: [number, number];
   heading: number;
   accuracy: number;
   receivedAt: number;
-  /** socket = ws/gps/live stream · rest = Redis copy read through GET /o/gps/live */
+  /** socket = ws/gps/live stream (the only live source; 'rest' is no longer used) */
   source: 'socket' | 'rest';
 }
 
 // While the live socket is delivering positions the REST copy is ignored.
-const LIVE_SOCKET_QUIET_MS = 30000;
 
 const SOCKET_STATUS_LABEL: Record<GpsSocketStatus, string> = {
   idle: 'Idle',
@@ -168,7 +166,7 @@ interface DriverGpsTrackingScreenProps {
  *   3. Within 100 m of the site: popup "Destination arrived". Pings KEEP going
  *      while it is open and after "Not yet". Only when the driver taps "Arrived":
  *      POST complete-journey, then stop pinging and close the socket.
- *      Arrival reported by Redis (GET /o/gps/live) or a "journey completed"
+ *      An arrival hint from the live socket (ws/gps/live) or a "journey completed"
  *      refusal from the socket also ends tracking.
  */
 export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = ({
@@ -733,32 +731,16 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
   const confirmServerArrival = useCallback(
     async (source: string) => {
       if (!dispatchKey) return;
-      try {
-        const live = await driverGpsService.fetchLiveLocation(dispatchKey, accessTokenRef.current);
-        const journey = String(live?.journeyStatus ?? live?.trackingStatus ?? '').toUpperCase();
-        const serverSaysArrived =
-          Boolean(live) &&
-          (live?.statusDispatch === DISPATCH_STATUS.ARRIVED ||
-            live?.arrived === true ||
-            journey === 'COMPLETED' ||
-            journey === 'ARRIVED');
-        gpsLog('ARRIVAL hint (' + source + ') checked with the server', {
-          dispatch: dispatchKey,
-          serverSaysArrived,
-          journey: journey || '-',
-        });
-        const recentlyDismissed =
-          arrivalPromptDismissedRef.current &&
-          Date.now() - arrivalDismissedAtRef.current < ARRIVAL_REPROMPT_MS;
-
-        // Do NOT auto-update status — show the popup instead so the driver confirms.
-        if (serverSaysArrived && !completingRef.current && !arrivalPromptVisibleRef.current && !recentlyDismissed) {
-          gpsLog('ARRIVAL hint -> showing popup for driver confirmation (no auto-complete)', { source });
-          arrivalPromptVisibleRef.current = true;
-          setArrivalPromptVisible(true);
-        }
-      } catch (err) {
-        gpsWarn('ARRIVAL hint (' + source + ') could not be checked', { err: String(err) });
+      // The hint comes from the GPS WebSocket (ws/gps/live). No Liferay call here:
+      // complete-journey itself checks the 100 m rule when the driver confirms.
+      const recentlyDismissed =
+        arrivalPromptDismissedRef.current &&
+        Date.now() - arrivalDismissedAtRef.current < ARRIVAL_REPROMPT_MS;
+      gpsLog('ARRIVAL hint (' + source + ')', { dispatch: dispatchKey, recentlyDismissed });
+      if (!completingRef.current && !arrivalPromptVisibleRef.current && !recentlyDismissed) {
+        gpsLog('ARRIVAL hint -> showing popup for driver confirmation (no auto-complete)', { source });
+        arrivalPromptVisibleRef.current = true;
+        setArrivalPromptVisible(true);
       }
     },
     [dispatchKey]
@@ -774,7 +756,6 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
 
     let isMounted = true;
     let subscription: Location.LocationSubscription | null = null;
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
     let socket: GpsWebSocket | null = null;
 
@@ -1049,94 +1030,8 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
       // Every 10 s: ping if the vehicle moved since the last ping (or heartbeat is due).
       pingTimer = setInterval(sendPingIfNeeded, PING_INTERVAL_MS);
 
-      // Redis live state (GET /o/gps/live). Used ONLY for server-side status
-      // (arrival + distance) — it never moves the map marker.
-      let pollInFlight = false;
-      pollTimer = setInterval(async () => {
-        if (!isMounted || pollInFlight) return;
-        pollInFlight = true;
-        try {
-          const live = await driverGpsService.fetchLiveLocation(dispatchKey, accessTokenRef.current);
-          if (!isMounted) return;
-          if (!live) {
-            gpsWarn('REDIS live read returned nothing', { dispatch: dispatchKey });
-            return;
-          }
-          // What the SERVER currently holds for this dispatch - compare with the last [GPS-PING] SENT line.
-          gpsLog('REDIS live (server copy)', {
-            lat: live.latitude,
-            lng: live.longitude,
-            device: live.deviceId,
-            ts: live.timestamp,
-            journey: live.journeyStatus ?? live.trackingStatus,
-            distToSiteM: live.distanceToDestinationMeters,
-          });
-
-          // The same Redis position, read through Liferay. Drawn only while the
-          // live socket (ws/gps/live) is not delivering — e.g. a GPS service build
-          // without that endpoint. An entry without a deviceId is the dispatch's
-          // setup position, not the truck.
-          const redisLat = Number(live.latitude);
-          const redisLng = Number(live.longitude);
-          if (
-            Date.now() - lastLiveSocketAtRef.current > LIVE_SOCKET_QUIET_MS &&
-            live.deviceId &&
-            Number.isFinite(redisLat) &&
-            Number.isFinite(redisLng) &&
-            !(redisLat === 0 && redisLng === 0)
-          ) {
-            const redisHeading = Number(live.heading);
-            const redisAccuracy = Number(live.accuracy);
-            setServerLive((prev) =>
-              prev && prev.source === 'rest' && prev.coord[0] === redisLat && prev.coord[1] === redisLng
-                ? { ...prev, receivedAt: Date.now() }
-                : {
-                    coord: [redisLat, redisLng],
-                    heading: Number.isFinite(redisHeading) && redisHeading > 0 ? redisHeading : 0,
-                    accuracy: Number.isFinite(redisAccuracy) && redisAccuracy > 0 ? redisAccuracy : 0,
-                    receivedAt: Date.now(),
-                    source: 'rest',
-                  }
-            );
-          }
-
-          const journey = String(live.journeyStatus ?? live.trackingStatus ?? '').toUpperCase();
-          if (
-            live.statusDispatch === DISPATCH_STATUS.ARRIVED ||
-            live.arrived === true ||
-            journey === 'COMPLETED' ||
-            journey === 'ARRIVED'
-          ) {
-            gpsLog('ARRIVAL reported by Redis -> showing popup for driver confirmation (no auto-complete)', { dispatch: dispatchKey });
-            const recentlyDismissed =
-              arrivalPromptDismissedRef.current &&
-              Date.now() - arrivalDismissedAtRef.current < ARRIVAL_REPROMPT_MS;
-
-            // Do NOT auto-update status — the driver must tap "Confirm" in the popup.
-            if (!completingRef.current && !arrivalPromptVisibleRef.current && !recentlyDismissed) {
-              arrivalPromptVisibleRef.current = true;
-              setArrivalPromptVisible(true);
-            }
-            return;
-          }
-
-          const serverMeters =
-            live.distanceToDestinationMeters !== undefined &&
-            live.distanceToDestinationMeters !== null &&
-            live.distanceToDestinationMeters !== ''
-              ? Number(live.distanceToDestinationMeters)
-              : NaN;
-          // The server distance is only used before this phone has its own GPS fix.
-          if (Number.isFinite(serverMeters) && !lastDeviceGpsRef.current) {
-            setDistanceToSiteM(serverMeters);
-            checkArrival(serverMeters, null);
-          }
-        } catch (pollErr) {
-          gpsWarn('REDIS live poll failed', { err: String(pollErr) });
-        } finally {
-          pollInFlight = false;
-        }
-      }, LIVE_STATUS_POLL_INTERVAL_MS);
+      // Live position comes ONLY from the GPS WebSocket API (ws/gps/live, effect below).
+      // No Liferay API is polled for the live location or its status.
     })();
 
     return () => {
@@ -1154,7 +1049,6 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
       });
       subscription?.remove();
       if (pingTimer) clearInterval(pingTimer);
-      if (pollTimer) clearInterval(pollTimer);
       socket?.close();
       setSocketStatus('closed');
     };
@@ -1207,15 +1101,21 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
   //
   //   Only opened when the GPS service supports this endpoint (health check
   //   returns a "liveEndpoint" field). Old server builds don't have it, which
-  //   causes the "WebSocket connection failed" console error. The REST poll
-  //   (GET /o/gps/live every 5 s) is always active as the fallback.
+  //   causes the "WebSocket connection failed" console error. There is no
+  //   Liferay fallback: the live location comes from this socket only.
   useEffect(() => {
     if (!isTracking || !dispatchKey) return;
 
     let isMounted = true;
     let live: GpsLiveSocket | null = null;
+    let healthRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    // Time of the newest position shown, so an older snapshot never moves the truck back.
+    let newestPositionTs = 0;
 
-    driverGpsService.checkGpsServiceHealth().then((health) => {
+    // While the network or the GPS service is down the truck stays at the last
+    // position received; the socket reconnects by itself and moves it again.
+    const connectLive = () => {
+     driverGpsService.checkGpsServiceHealth().then((health) => {
       if (!isMounted) return;
 
       // Only connect if the server explicitly advertises /ws/gps/live support.
@@ -1225,9 +1125,10 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
           (health as any).supportsLiveSocket === true);
 
       if (!serverSupportsLive) {
-        gpsLog('LIVE-READ socket skipped — server does not advertise liveEndpoint', {
+        gpsLog('LIVE-READ socket not opened yet — GPS service unreachable or without liveEndpoint; retry in 15 s', {
           healthStatus: health?.status ?? 'unreachable',
         });
+        healthRetryTimer = setTimeout(connectLive, LIVE_HEALTH_RETRY_MS);
         return;
       }
 
@@ -1237,7 +1138,10 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
           setLiveReadStatus(status);
         },
         onPosition: (p, fromSnapshot) => {
-          if (fromSnapshot && (!p.ts || Date.now() - p.ts > SERVER_LIVE_STALE_MS)) return;
+          // The snapshot is the last ping the GPS service has: shown even when it is old
+          // (truck parked / phone offline), but never over a newer position.
+          if (p.ts && p.ts < newestPositionTs) return;
+          if (p.ts) newestPositionTs = p.ts;
           gpsLog('LIVE-READ position (server copy) -> map', { lat: p.lat, lng: p.lng, snapshot: fromSnapshot });
           lastLiveSocketAtRef.current = Date.now();
           setServerLive({
@@ -1254,10 +1158,13 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
         },
       });
       live.connect();
-    });
+     });
+    };
+    connectLive();
 
     return () => {
       isMounted = false;
+      if (healthRetryTimer) clearTimeout(healthRetryTimer);
       live?.close();
       lastLiveSocketAtRef.current = 0;
       setServerLive(null);
@@ -1509,7 +1416,7 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
                       ? 'GPS Server (Redis, live socket)'
                       : 'GPS Server (Redis, via API)'
                     : serverLive
-                      ? 'GPS Server (no update for 2 min)'
+                      ? 'Last GPS position (waiting for live update)'
                       : liveReadStatus === 'open'
                         ? 'Waiting for GPS Server'
                         : 'GPS Server not connected'}
