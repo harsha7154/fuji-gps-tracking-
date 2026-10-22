@@ -67,15 +67,13 @@ export function checkForNewNotifications(params: {
 
   const run = (async () => {
     const startedAt = Date.now();
-    // Light list only (no per-item text lookups): this runs every 30 s.
-    const items = await notificationService.getNotifications(
+    // Light snapshot only (newest items + server unread count, no per-item text lookups).
+    const { items, unreadCount } = await notificationService.getBadgeSnapshot(
       params.accessToken,
       params.refreshToken,
       params.onTokenRefresh,
-      { onSessionExpired: params.onSessionExpired, enrich: false },
+      params.onSessionExpired,
     );
-
-    const unreadCount = items.filter((n) => !n.read).length;
     const maxId = items.reduce((max, n) => (typeof n.id === 'number' && n.id > max ? n.id : max), 0);
     const lastSeen = await readLastSeenId(params.userId);
 

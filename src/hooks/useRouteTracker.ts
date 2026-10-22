@@ -62,6 +62,9 @@ export function useRouteTracker(input: UseRouteTrackerInput): DisplayState & { p
   historyRef.current = historyCoords;
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  // Latest live position, re-applied when the route is rebuilt so the truck does not disappear.
+  const liveRef = useRef({ liveCoord, liveHeading, liveAccuracy });
+  liveRef.current = { liveCoord, liveHeading, liveAccuracy };
 
   // Build the picture. Runs again only for another dispatch, other end points,
   // or when the journey starts.
@@ -87,6 +90,19 @@ export function useRouteTracker(input: UseRouteTrackerInput): DisplayState & { p
     const pings = (historyRef.current ?? [])
       .map((c) => tupleToPt(c))
       .filter((p): p is Pt => p !== null);
+
+    // Re-apply the last live position (queued until init finishes): after a rebuild the truck
+    // stays where it was instead of vanishing until the next WebSocket update.
+    const last = liveRef.current;
+    if (phaseRef.current === 'inTransit' && last.liveCoord && (last.liveCoord[0] !== 0 || last.liveCoord[1] !== 0)) {
+      tracker.onPosition({
+        lat: last.liveCoord[0],
+        lng: last.liveCoord[1],
+        heading: last.liveHeading,
+        accuracy: last.liveAccuracy,
+        ts: Date.now(),
+      });
+    }
 
     tracker
       .init({

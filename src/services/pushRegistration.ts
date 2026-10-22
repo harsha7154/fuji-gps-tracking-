@@ -42,6 +42,7 @@ import { AppState, Platform } from 'react-native';
 import { getBaseUrl } from '../api/client';
 import { loadNotificationsModule } from '../utils/optionalNativeModules';
 import { appStorage } from './sessionStorage';
+import { isBackgroundNotificationsEnabled } from './appSettings';
 
 const FIELD = 'fCMToken';
 const STORED_KEY = 'fuji_push_registration';
@@ -58,6 +59,17 @@ type FieldStyle = 'top' | 'custom';
 let lastOkAt = 0;
 /** Always the CURRENT signed-in user + token, so a retry never reuses an expired access token. */
 let latestAuthGetter: (() => PushAuth | null) | null = null;
+
+// Listeners for "an FCM push arrived while the app is open" (badge / list refresh on demand).
+const pushReceivedListeners = new Set<() => void>();
+
+/** Called whenever an FCM push is received while the app is open. Returns the unsubscribe function. */
+export function onPushReceived(listener: () => void): () => void {
+  pushReceivedListeners.add(listener);
+  return () => {
+    pushReceivedListeners.delete(listener);
+  };
+}
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 /** Registration already running: callers share it instead of sending parallel requests. */
 let inFlight: Promise<boolean> | null = null;
@@ -249,6 +261,11 @@ async function readStyle(): Promise<FieldStyle | null> {
 
 /** Saves this phone's FCM token on the signed-in driver's Liferay account. Returns true on success. */
 export async function registerForPush(auth: PushAuth, attempt = 0): Promise<boolean> {
+  // Settings > Background Notifications OFF: this phone must not get pushes (they show while the app is closed).
+  if (!(await isBackgroundNotificationsEnabled())) {
+    log('registration skipped: Background Notifications is off in Settings');
+    return false;
+  }
   if (inFlight) return inFlight;
   inFlight = registerOnce(auth).finally(() => {
     inFlight = null;
@@ -303,6 +320,25 @@ async function registerOnce(auth: PushAuth): Promise<boolean> {
   } catch (err) {
     warn('registration failed (network?):', err);
     return false;
+  }
+}
+
+/**
+ * Settings > Background Notifications changed: register this phone for pushes again (ON) or remove
+ * its token from the server (OFF) for the signed-in user. Never throws.
+ */
+export async function setBackgroundPushEnabled(enabled: boolean): Promise<void> {
+  const auth = latestAuthGetter?.() ?? null;
+  if (!auth) return;
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+  if (enabled) {
+    await registerForPush(auth).catch(() => false);
+  } else {
+    lastOkAt = 0;
+    await unregisterFromPush(auth);
   }
 }
 
@@ -367,6 +403,16 @@ export function watchPushTokenChanges(getAuth: () => PushAuth | null): () => voi
   const receivedSub = Notifications.addNotificationReceivedListener((n: any) => {
     const d = describe(n);
     log(d.source === 'FCM push' ? 'RECEIVED (push) while app is open' : 'received (local alert) while app is open', d);
+    // Only a real push means "something new on the server" (local alerts are raised by the app itself).
+    if (d.source === 'FCM push') {
+      pushReceivedListeners.forEach((listener) => {
+        try {
+          listener();
+        } catch (err) {
+          warn('push listener failed:', err);
+        }
+      });
+    }
   });
 
   const responseSub = Notifications.addNotificationResponseReceivedListener((r: any) => {

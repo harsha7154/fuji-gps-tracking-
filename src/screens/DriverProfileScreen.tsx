@@ -20,7 +20,7 @@ import { liferayProfileService, LiferayProfile, ProfileContact } from '../servic
 import type { TokenRefreshHandler } from '../services/notificationService';
 import type { UserProfile } from '../types/auth';
 import type { DispatchItem } from '../types/driverDashboard';
-import { DISPATCH_STATUS, getDispatchStatusLabel } from '../utils/dispatchStatus';
+import { DISPATCH_STATUS } from '../utils/dispatchStatus';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface DriverProfileScreenProps {
@@ -31,6 +31,8 @@ interface DriverProfileScreenProps {
   onTokenRefresh?: TokenRefreshHandler;
   onBack: () => void;
   onLogout: () => void;
+  /** Opens the Settings screen (background notifications / background GPS). */
+  onOpenSettings?: () => void;
   onNavigateToNotifications?: () => void;
   onNavigateToLiveGps?: () => void;
   onNavigateToMyTrip?: () => void;
@@ -67,13 +69,10 @@ function deliveryTime(d: DispatchItem): number {
   return Number.isFinite(t) ? t : 0;
 }
 
-function toNumber(value: unknown): number {
-  const n = typeof value === 'number' ? value : Number(String(value ?? '').replace(/,/g, ''));
-  return Number.isFinite(n) ? n : 0;
-}
-
-function formatQuantity(n: number): string {
-  return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+/** User ID as shown to the driver: "100" + Liferay userId (45123 -> "10045123"). */
+function displayUserId(id?: string | number): string | undefined {
+  const value = id === undefined || id === null ? '' : String(id).trim();
+  return value ? `100${value}` : undefined;
 }
 
 function titleCase(text?: string): string | undefined {
@@ -91,13 +90,8 @@ interface TripStats {
   completed: number;
   active: number;
   inTransit?: DispatchItem;
-  quantityDelivered: number;
-  sitesServed: number;
   vehicleNumber?: string;
   vehicles: string[];
-  lastPlant?: string;
-  lastDelivery?: DispatchItem;
-  latest?: DispatchItem;
 }
 
 function buildStats(dispatches: DispatchItem[]): TripStats {
@@ -106,22 +100,14 @@ function buildStats(dispatches: DispatchItem[]): TripStats {
   const vehicles = Array.from(
     new Set(byNewest.map((d) => d.vehicleNumber?.trim()).filter((v): v is string => !!v)),
   );
-  const sites = new Set(
-    completed.map((d) => d.siteMasterObjectEntryId ?? d.siteName ?? d.destinationSiteAWC).filter(Boolean),
-  );
 
   return {
     total: dispatches.length,
     completed: completed.length,
     active: dispatches.length - completed.length,
     inTransit: byNewest.find((d) => d.statusDispatch === DISPATCH_STATUS.IN_TRANSIT),
-    quantityDelivered: completed.reduce((sum, d) => sum + toNumber(d.quantity), 0),
-    sitesServed: sites.size,
     vehicleNumber: vehicles[0],
     vehicles,
-    lastPlant: byNewest[0]?.plantName || undefined,
-    lastDelivery: [...completed].sort((a, b) => deliveryTime(b) - deliveryTime(a))[0],
-    latest: byNewest[0],
   };
 }
 
@@ -131,9 +117,8 @@ function buildStats(dispatches: DispatchItem[]): TripStats {
  * Driver profile — everything shown comes from real data:
  *   - Liferay user account (login): name, email, username, job title, status,
  *     member since, last login, user id, photo
- *   - Dispatches API (GET /o/material-dispatch-rest/dispatches?userId=):
- *     trip counts, quantity delivered, sites served, assigned vehicle(s),
- *     current trip, last delivery
+ *   - Dispatches API (GET /o/material-dispatch-rest/dispatches?userId=, shared cache):
+ *     trip counts, assigned vehicle(s), current trip
  * Rows whose value the server doesn't provide are hidden instead of faked.
  */
 export const DriverProfileScreen: React.FC<DriverProfileScreenProps> = ({
@@ -143,6 +128,7 @@ export const DriverProfileScreen: React.FC<DriverProfileScreenProps> = ({
   onTokenRefresh,
   onBack,
   onLogout,
+  onOpenSettings,
   onNavigateToNotifications,
   onNavigateToLiveGps,
   onNavigateToMyTrip,
@@ -395,47 +381,6 @@ export const DriverProfileScreen: React.FC<DriverProfileScreenProps> = ({
             </Pressable>
           ) : null}
 
-          {/* ── Delivery summary ── */}
-          <Section icon="stats-chart-outline" title="Delivery Summary">
-            {stats === null ? (
-              <View style={styles.sectionLoading}>
-                <ActivityIndicator color={colors.primary} />
-              </View>
-            ) : stats.total === 0 ? (
-              <Text style={styles.emptyText}>No dispatches assigned yet.</Text>
-            ) : (
-              <InfoRows
-                rows={[
-                  {
-                    icon: 'cube-outline',
-                    label: 'Quantity delivered',
-                    value: stats.completed > 0 ? formatQuantity(stats.quantityDelivered) : undefined,
-                  },
-                  {
-                    icon: 'location-outline',
-                    label: 'Sites delivered to',
-                    value: stats.completed > 0 ? String(stats.sitesServed) : undefined,
-                  },
-                  {
-                    icon: 'flag-outline',
-                    label: 'Last delivery',
-                    value: stats.lastDelivery
-                      ? `${stats.lastDelivery.siteName || stats.lastDelivery.destinationSiteAWC}${
-                          stats.lastDelivery.deliveryDate ? ` • ${stats.lastDelivery.deliveryDate}` : ''
-                        }`
-                      : undefined,
-                  },
-                  { icon: 'business-outline', label: 'Dispatching plant', value: stats.lastPlant },
-                  {
-                    icon: 'time-outline',
-                    label: 'Latest trip status',
-                    value: stats.latest ? getDispatchStatusLabel(stats.latest.statusDispatch) : undefined,
-                  },
-                ]}
-              />
-            )}
-          </Section>
-
           {/* ── Vehicle ── */}
           {vehicleNumber || user.vehicleModel ? (
             <Section icon="bus-outline" title="Assigned Vehicle">
@@ -517,7 +462,7 @@ export const DriverProfileScreen: React.FC<DriverProfileScreenProps> = ({
             <InfoRows
               rows={[
                 { icon: 'at-outline', label: 'Username', value: profile?.screenName || user.alternateName },
-                { icon: 'id-card-outline', label: 'User ID', value: profile?.id || user.id },
+                { icon: 'id-card-outline', label: 'User ID', value: displayUserId(profile?.id || user.id) },
                 { icon: 'checkmark-circle-outline', label: 'Status', value: titleCase(accountStatus) },
                 {
                   icon: 'calendar-outline',
@@ -542,6 +487,18 @@ export const DriverProfileScreen: React.FC<DriverProfileScreenProps> = ({
               ]}
             />
           </Section>
+
+          {onOpenSettings ? (
+            <Pressable
+              onPress={onOpenSettings}
+              accessibilityRole="button"
+              accessibilityLabel="Settings"
+              style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}
+            >
+              <Ionicons name="settings-outline" size={18} color={colors.primary} />
+              <Text style={styles.settingsText}>Settings</Text>
+            </Pressable>
+          ) : null}
 
           <Pressable
             onPress={onLogout}
@@ -891,6 +848,19 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
   },
   logoutText: { ...typography.button, fontSize: 15, color: colors.error },
+  settingsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: radius.md,
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  settingsText: { ...typography.button, fontSize: 15, color: colors.primary },
 
   bottomSpacer: { height: spacing.lg },
 });

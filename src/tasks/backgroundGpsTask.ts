@@ -43,6 +43,7 @@ import { decidePing, distanceMeters, LastSentPing } from '../utils/pingGate';
 import { loadTaskManagerModule } from '../utils/optionalNativeModules';
 import { ensureBackgroundLocationPermission, promptBatteryOptimizationOnce } from '../utils/backgroundPermissions';
 import { runBackgroundNotificationCheck } from './backgroundNotificationTask';
+import { isBackgroundGpsEnabled } from '../services/appSettings';
 
 export const GPS_BACKGROUND_TASK = 'fuji-background-gps';
 
@@ -164,6 +165,12 @@ function ensureSocket(config: BackgroundGpsConfig): GpsWebSocket {
 // ── the task ──────────────────────────────────────────────────────────────────
 
 async function handleLocations(locations: Location.LocationObject[]): Promise<void> {
+  // Settings > Background GPS Tracking OFF: the service may only run while the app is open.
+  if (AppState.currentState !== 'active' && !(await isBackgroundGpsEnabled())) {
+    await stopBackgroundGpsTracking('background-gps-off');
+    return;
+  }
+
   const config = await loadConfig();
   if (!config) {
     // The service is running but nothing is being tracked (stale) -> shut it down.
@@ -282,6 +289,14 @@ export function startBackgroundGpsTracking(start: BackgroundGpsStart): Promise<b
 async function doStart(start: BackgroundGpsStart): Promise<boolean> {
   if (Platform.OS === 'web' || !TaskManager) return false;
   try {
+    const backgroundAllowed = await isBackgroundGpsEnabled();
+    // Background GPS OFF: in-app tracking only, so the service may start only while the app is open
+    // (it stops itself as soon as the app is hidden, see handleLocations / BackgroundGpsController).
+    if (!backgroundAllowed && AppState.currentState !== 'active') {
+      gpsLog('[BG-GPS] not started: Background GPS Tracking is off in Settings');
+      return false;
+    }
+
     const { status } = await Location.getForegroundPermissionsAsync();
     if (status !== 'granted') {
       gpsWarn('[BG-GPS] not started: location permission not granted');
@@ -289,7 +304,8 @@ async function doStart(start: BackgroundGpsStart): Promise<boolean> {
     }
 
     // Best-effort, once per install: "Allow all the time" + battery exemption (never blocks tracking).
-    if (AppState.currentState === 'active') {
+    // Not asked while Background GPS Tracking is off in Settings.
+    if (backgroundAllowed && AppState.currentState === 'active') {
       await ensureBackgroundLocationPermission();
       await promptBatteryOptimizationOnce();
     }
@@ -372,6 +388,11 @@ export async function resumeBackgroundGpsIfNeeded(): Promise<void> {
   try {
     const config = await loadConfig();
     if (!config) return;
+    // Background GPS Tracking OFF in Settings: never restart from the background.
+    if (!(await isBackgroundGpsEnabled())) {
+      await stopBackgroundGpsTracking('background-gps-off');
+      return;
+    }
     if (Date.now() - config.startedAt > MAX_TRACKING_MS) {
       await stopBackgroundGpsTracking('max-duration');
       return;

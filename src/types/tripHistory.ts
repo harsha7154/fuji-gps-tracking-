@@ -5,7 +5,7 @@
  * seamlessly be swapped for a real API response later.
  */
 
-export type TripHistoryStatus = 'IN TRANSIT' | 'DELIVERED';
+export type TripHistoryStatus = 'DISPATCHED' | 'IN TRANSIT' | 'DELIVERED';
 
 export type TripHistoryFilter = 'ALL' | 'DELIVERED' | 'IN_TRANSIT';
 

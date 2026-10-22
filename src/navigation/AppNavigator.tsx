@@ -22,6 +22,7 @@ import { DriverDashboardScreen } from '../screens/DriverDashboardScreen';
 import { EngineerProfileScreen } from '../screens/EngineerProfileScreen';
 
 import { DriverProfileScreen } from '../screens/DriverProfileScreen';
+import { SettingsScreen } from '../screens/SettingsScreen';
 
 
 
@@ -80,7 +81,17 @@ import { DriverGpsTrackingScreen } from '../screens/DriverGpsTrackingScreen';
 import { GlobalArrivalPrompt } from '../components/GlobalArrivalPrompt';
 import { BackgroundGpsController } from '../components/BackgroundGpsController';
 import { stopBackgroundGpsTracking } from '../tasks/backgroundGpsTask';
-import { registerForPush, unregisterFromPush, watchPushTokenChanges } from '../services/pushRegistration';
+import { driverGpsService, formatLiveGps } from '../services/driverGpsService';
+import {
+  clearPendingPod,
+  getPendingPod,
+  markPendingPodUploaded,
+  PendingPod,
+  subscribePendingPod,
+} from '../services/pendingPodService';
+import { getDeviceId } from '../utils/deviceId';
+import { DISPATCH_STATUS } from '../utils/dispatchStatus';
+import { onPushReceived, registerForPush, unregisterFromPush, watchPushTokenChanges } from '../services/pushRegistration';
 import { promptBatteryOptimizationOnce, promptNotificationSettingsOnce } from '../utils/backgroundPermissions';
 
 import { DriverPodScreen } from '../screens/DriverPodScreen';
@@ -228,7 +239,9 @@ type AppRoute =
 
   | 'DriverCamera'
 
-  | 'DriverPodSuccess';
+  | 'DriverPodSuccess'
+
+  | 'DriverSettings';
 
 
 
@@ -1144,6 +1157,9 @@ export const AppNavigator: React.FC = () => {
   const consecutive401Ref = useRef<number>(0);
   const backoffUntilRef = useRef<number>(0);
 
+  /** Badge fallback poll; pushes and app-foreground refresh it immediately. */
+  const NOTIFICATION_FALLBACK_POLL_MS = 2 * 60_000;
+
   const refreshNotificationCount =
     useCallback(async (force = false) => {
       const now = Date.now();
@@ -1236,7 +1252,12 @@ export const AppNavigator: React.FC = () => {
 
 
 
-  // Re-check on screen change (throttled to max once per 20s)…
+  // Badge is refreshed only when needed:
+  //  - once after sign-in / app start,
+  //  - an FCM push arrives while the app is open (something new on the server),
+  //  - the app comes back to the foreground (AppState listener below),
+  //  - a slow fallback poll (NOTIFICATION_FALLBACK_POLL_MS) in case a push is lost.
+  // Screen changes no longer trigger a request.
 
   useEffect(() => {
 
@@ -1246,15 +1267,15 @@ export const AppNavigator: React.FC = () => {
 
     }
 
+    refreshNotificationCount(true);
+
+    return onPushReceived(() => refreshNotificationCount(true));
+
+  }, [isSignedIn, refreshNotificationCount]);
 
 
-    refreshNotificationCount(false);
 
-  }, [route, isSignedIn, refreshNotificationCount]);
-
-
-
-  // …and every 30 s while signed in.
+  // Fallback poll while signed in and in the foreground.
 
   useEffect(() => {
 
@@ -1272,10 +1293,10 @@ export const AppNavigator: React.FC = () => {
 
         () => {
           // No point polling while the app is in the background (the background task covers that).
-          if (appStateRef.current === 'active') refreshNotificationCount(true);
+          if (appStateRef.current === 'active') refreshNotificationCount(false);
         },
 
-        30 * 1000
+        NOTIFICATION_FALLBACK_POLL_MS
 
       );
 
@@ -1312,6 +1333,40 @@ export const AppNavigator: React.FC = () => {
     registerBackgroundNotificationCheck();
 
   }, [isSignedIn]);
+
+  // ── Pending proof of delivery (arrival confirmed, journey not completed yet) ──
+  // Persisted per driver: after an app restart or logout / login the driver is sent back to the
+  // POD screen until the POD is uploaded and complete-journey succeeded.
+  const [pendingPod, setPendingPod] = useState<PendingPod | null>(null);
+  const podRedirectUserRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isSignedIn || !currentUser?.id || currentUser.role !== 'TRUCK_DRIVER') {
+      podRedirectUserRef.current = null;
+      setPendingPod(null);
+      return;
+    }
+    const uid = String(currentUser.id);
+    let active = true;
+    getPendingPod(uid).then((pending) => {
+      if (!active) return;
+      setPendingPod(pending);
+      // Once per sign-in / app start: go back to the POD screen.
+      if (pending && podRedirectUserRef.current !== uid) {
+        setSelectedDispatchId(pending.dispatchId);
+        setSelectedObjectEntryId(pending.objectEntryId);
+        setRoute('DriverPod');
+      }
+      podRedirectUserRef.current = uid;
+    });
+    const unsub = subscribePendingPod((changedUser, pending) => {
+      if (changedUser === uid) setPendingPod(pending);
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, [isSignedIn, currentUser?.id, currentUser?.role]);
 
   // FCM push: register this phone with the push relay while signed in, and keep it up to date.
   const pushAuthRef = useRef<{ userId: string; accessToken: string } | null>(null);
@@ -1837,6 +1892,8 @@ export const AppNavigator: React.FC = () => {
       []
 
     );
+
+  const goToDriverSettings = useCallback(() => setRoute('DriverSettings'), []);
 
 
 
@@ -2396,6 +2453,50 @@ export const AppNavigator: React.FC = () => {
       []
     );
 
+  /**
+   * Last step of the journey, ONLY after the POD photo is on the server:
+   * POST /o/material-dispatch-rest/complete-journey (status -> Arrived), with the position saved when
+   * the driver confirmed arrival (within 100 m). Single-flight; skipped when the server already
+   * reports Arrived. Throws when complete-journey fails (the POD screen shows the error + retry).
+   */
+  const completeJourneyInFlightRef = useRef<Promise<void> | null>(null);
+  const completePendingJourney = useCallback(
+    (pending: PendingPod): Promise<void> => {
+      if (completeJourneyInFlightRef.current) return completeJourneyInFlightRef.current;
+      const run = (async () => {
+        const token = accessToken ?? undefined;
+        const detail = await driverGpsService
+          .loadDispatchDetail(pending.objectEntryId, pending.userId, token)
+          .catch(() => null);
+        if (detail?.statusDispatch !== DISPATCH_STATUS.ARRIVED) {
+          const deviceId = await getDeviceId();
+          await driverGpsService.completeJourney(
+            {
+              objectEntryId: pending.objectEntryId,
+              deviceId,
+              liveGPS: formatLiveGps(pending.latitude, pending.longitude),
+            },
+            token,
+          );
+        }
+        console.log('[AppNavigator] complete-journey done after POD upload:', {
+          dispatchId: pending.dispatchId,
+          objectEntryId: pending.objectEntryId,
+        });
+        arrivalConfirmationService.confirmArrival(pending.dispatchId);
+        arrivalConfirmationService.confirmArrival(pending.objectEntryId);
+        setRecentlyArrivedDispatchId(pending.dispatchId);
+        await stopBackgroundGpsTracking('arrived').catch(() => { });
+        await clearPendingPod(pending.userId);
+      })().finally(() => {
+        completeJourneyInFlightRef.current = null;
+      });
+      completeJourneyInFlightRef.current = run;
+      return run;
+    },
+    [accessToken]
+  );
+
   const handleDriverPodSubmit =
     useCallback(
       async (screenTripSummary?: PodTripSummary | null) => {
@@ -2431,10 +2532,6 @@ export const AppNavigator: React.FC = () => {
             ? String(summary.objectEntryId)
             : undefined);
 
-        if (driverCapturedPhotos.length === 0) {
-          throw new Error('At least one photo must be captured before submitting POD.');
-        }
-
         console.log('[AppNavigator] Submitting POD with authoritative objectEntryId:', {
           realObjectEntryId,
           selectedObjectEntryId,
@@ -2446,21 +2543,45 @@ export const AppNavigator: React.FC = () => {
         const targetEntryId = realObjectEntryId || summary?.objectEntryId || selectedObjectEntryId || selectedDispatchId || '';
         const targetTripId = summary?.tripId || selectedDispatchId;
 
+        // Arrival confirmed in the popup for this dispatch -> complete-journey after the upload.
+        const pendingForTrip = await getPendingPod(currentUser?.id);
+        const pending =
+          pendingForTrip &&
+          (String(pendingForTrip.objectEntryId) === String(targetEntryId) ||
+            pendingForTrip.dispatchId === targetTripId)
+            ? pendingForTrip
+            : null;
+
         // Check if already submitted on backend or locally
         const existingStatus = await driverPodService.checkPodSubmissionStatus(
           { objectEntryId: targetEntryId, dispatchId: targetTripId },
           accessToken ?? undefined
         );
         if (existingStatus.isSubmitted) {
-          Alert.alert(
-            'Already Submitted',
-            `Proof of Delivery has already been submitted for dispatch ${targetTripId || targetEntryId}.`
-          );
+          if (pending) {
+            // Photo already uploaded earlier (e.g. before an app restart): only complete the journey.
+            await markPendingPodUploaded(pending.userId);
+            try {
+              await completePendingJourney(pending);
+            } catch (err) {
+              const detail = err instanceof Error ? err.message : String(err);
+              throw new Error(`The photo is uploaded, but the journey could not be completed: ${detail}`);
+            }
+          } else {
+            Alert.alert(
+              'Already Submitted',
+              `Proof of Delivery has already been submitted for dispatch ${targetTripId || targetEntryId}.`
+            );
+          }
           if (summary) {
             setDriverPodTripSummary(summary);
           }
           setRoute('DriverPodSuccess');
           return;
+        }
+
+        if (driverCapturedPhotos.length === 0) {
+          throw new Error('At least one photo must be captured before submitting POD.');
         }
 
         const submission = await driverPodService.submitPod({
@@ -2478,10 +2599,25 @@ export const AppNavigator: React.FC = () => {
         if (summary) {
           setDriverPodTripSummary(summary);
         }
+
+        // Photo saved -> now (and only now) set the dispatch to Arrived.
+        if (pending) {
+          await markPendingPodUploaded(pending.userId);
+          try {
+            await completePendingJourney(pending);
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            throw new Error(
+              `The photo is uploaded, but the journey could not be completed: ${detail} Tap "Complete Journey" to try again.`
+            );
+          }
+        }
+
         setRoute('DriverPodSuccess');
       },
       [
         accessToken,
+        completePendingJourney,
         currentUser?.id,
         driverCapturedPhotos,
         driverPodTripSummary,
@@ -3129,6 +3265,7 @@ export const AppNavigator: React.FC = () => {
             selectedDispatchId={selectedDispatchId}
             objectEntryId={selectedObjectEntryId ?? driverPodTripSummary?.objectEntryId}
             initialTripSummary={driverPodTripSummary}
+            journeyCompletionPending={Boolean(pendingPod)}
           />
         );
 
@@ -3343,6 +3480,8 @@ export const AppNavigator: React.FC = () => {
 
               }
 
+              onOpenSettings={goToDriverSettings}
+
               onNavigateToNotifications={
 
                 goToDriverNotifications
@@ -3398,6 +3537,29 @@ export const AppNavigator: React.FC = () => {
 
 
 
+
+      // ==========================================================
+
+      // DRIVER SETTINGS (background notifications / background GPS)
+
+      // ==========================================================
+
+      case 'DriverSettings':
+        if (currentUser) {
+          return (
+            <SettingsScreen
+              onBack={goToDriverProfile}
+              onNavigateToDashboard={handleBackToDashboardFromProfile}
+              onNavigateToNotifications={goToDriverNotifications}
+              onNavigateToLiveGps={goToDriverGpsTracking}
+              onNavigateToMyTrip={goToDriverMyTrip}
+              onNavigateToTripHistory={goToDriverTripHistory}
+              notificationCount={notificationCount}
+            />
+          );
+        }
+
+        return <SplashScreen onFinish={goToLogin} />;
 
       // ==========================================================
 
@@ -4434,7 +4596,13 @@ export const AppNavigator: React.FC = () => {
 
           route !== 'DriverGpsTracking' &&
 
-          route !== 'DriverTripHistory'
+          route !== 'DriverTripHistory' &&
+
+          route !== 'DriverPod' &&
+
+          route !== 'DriverCamera' &&
+
+          route !== 'DriverPodSuccess'
 
         }
 
@@ -4442,31 +4610,7 @@ export const AppNavigator: React.FC = () => {
 
         accessToken={accessToken}
 
-        onJourneyCompleted={(dispatchId, entryId) => {
-          console.log('[AppNavigator] Immediately before handling arrival confirmation callback:', {
-            selectedDispatchId: dispatchId,
-            objectEntryId: entryId,
-            currentRoute: route,
-            navigationDecision: 'Received arrival confirmation from GlobalArrivalPrompt; updating selected dispatch and navigating to DriverGpsTracking with arrived state',
-          });
-          setSelectedDispatchId(dispatchId);
-          if (entryId !== undefined) {
-            setSelectedObjectEntryId(entryId);
-          }
-          arrivalConfirmationService.confirmArrival(dispatchId);
-          if (entryId !== undefined) {
-            arrivalConfirmationService.confirmArrival(entryId);
-          }
-          setRecentlyArrivedDispatchId(dispatchId);
-          setRoute('DriverGpsTracking');
-          console.log('[AppNavigator] Immediately after handling arrival confirmation callback:', {
-            newRoute: 'DriverGpsTracking',
-            selectedDispatchId: dispatchId,
-            selectedObjectEntryId: entryId ?? selectedObjectEntryId,
-            recentlyArrivedDispatchId: dispatchId,
-            isInitiallyArrived: true,
-          });
-        }}
+        onArrivalConfirmed={handleDriverArrivedProceedToPod}
 
       />
 

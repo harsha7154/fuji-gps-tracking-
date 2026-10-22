@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    Alert,
     AppState,
+    BackHandler,
     Pressable,
     SectionList,
     StyleSheet,
@@ -12,7 +14,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 
 import { notificationService } from '../services/notificationService';
-import type { LiferayNotification } from '../services/notificationService';
+import { onPushReceived } from '../services/pushRegistration';
+import type { LiferayNotification, NotificationPage } from '../services/notificationService';
 import { colors, radius, spacing, typography } from '../theme';
 import {
     cleanActionLabel,
@@ -174,6 +177,37 @@ const groupByDate = (items: LiferayNotification[]): NotificationSection[] => {
 
 const MARK_ALL_CONCURRENCY = 4;
 
+/** Fallback silent refresh while the screen is open (a push or app-foreground refreshes at once). */
+const SILENT_REFRESH_FALLBACK_MS = 2 * 60_000;
+
+/** Starts fetching the next page when the user is this close to the bottom (screen heights). */
+const LOAD_MORE_THRESHOLD = 0.5;
+
+/** Cached first page (an older app build stored a plain array under the same key: ignore that). */
+const peekFirstPage = (): NotificationPage | undefined => {
+    const cached = peekQuery<unknown>(qk.notifications());
+    return cached && !Array.isArray(cached) && Array.isArray((cached as NotificationPage).items)
+        ? (cached as NotificationPage)
+        : undefined;
+};
+
+/** Adds the items that are not on screen yet (no duplicates when new notifications shift the pages). */
+const appendUnique = (current: LiferayNotification[], incoming: LiferayNotification[]): LiferayNotification[] => {
+    const seen = new Set(current.map((n) => n.id));
+    const extra = incoming.filter((n) => !seen.has(n.id));
+    return extra.length === 0 ? current : current.concat(extra);
+};
+
+/** Fresh first page on top, older pages that were already loaded kept below it. */
+const mergeFirstPage = (current: LiferayNotification[], firstPage: LiferayNotification[]): LiferayNotification[] => {
+    const firstIds = new Set(firstPage.map((n) => n.id));
+    return firstPage.concat(current.filter((n) => !firstIds.has(n.id)));
+};
+
+/** Newest first (used when deleted items have to be put back after a failed delete). */
+const byNewest = (a: LiferayNotification, b: LiferayNotification): number =>
+    (Date.parse(b.dateCreated ?? '') || 0) - (Date.parse(a.dateCreated ?? '') || 0);
+
 export const NotificationsScreen: React.FC<
     NotificationsScreenProps
 > = ({
@@ -185,11 +219,21 @@ export const NotificationsScreen: React.FC<
 }) => {
         const insets = useSafeAreaInsets();
         const [notifications, setNotifications] = useState<LiferayNotification[]>(
-            () => peekQuery<LiferayNotification[]>(qk.notifications()) ?? [],
+            () => peekFirstPage()?.items ?? [],
         );
         const [filter, setFilter] = useState<FilterKey>('all');
 
-        const [loading, setLoading] = useState(() => !peekQuery(qk.notifications()));
+        const [loading, setLoading] = useState(() => !peekFirstPage());
+
+        // ── Infinite scroll (50 per page) ──
+        const [hasMore, setHasMore] = useState(() => peekFirstPage()?.hasMore ?? false);
+        const [totalCount, setTotalCount] = useState<number | null>(() => peekFirstPage()?.totalCount ?? null);
+        const [loadingMore, setLoadingMore] = useState(false);
+        const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+        const pageRef = useRef(1);                 // last page that is on screen
+        const hasMoreRef = useRef(hasMore);
+        const loadingMoreRef = useRef(false);      // one "next page" request at a time
+        const listGenerationRef = useRef(0);       // a pull-to-refresh makes older page answers stale
         const [refreshing, setRefreshing] = useState(false);
         const [error, setError] = useState<string | null>(null);
 
@@ -199,6 +243,15 @@ export const NotificationsScreen: React.FC<
         // short-lived message under the header (e.g. a mark-as-read failure)
         const [banner, setBanner] = useState<string | null>(null);
         const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+        // ── Delete / multi-select ──
+        const [selectionMode, setSelectionMode] = useState(false);
+        const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+        const [deleting, setDeleting] = useState(false);
+        // Deleted (or being deleted) ids: a refresh / next page answering meanwhile must not bring them back.
+        const removedIdsRef = useRef<Set<number>>(new Set());
+        const withoutRemoved = (items: LiferayNotification[]): LiferayNotification[] =>
+            removedIdsRef.current.size === 0 ? items : items.filter((n) => !removedIdsRef.current.has(n.id));
 
         const showBanner = useCallback((text: string) => {
             setBanner(text);
@@ -216,10 +269,11 @@ export const NotificationsScreen: React.FC<
         );
         const readCount = notifications.length - unreadCount;
 
-        // Keep the header bell badge (AppNavigator) in sync immediately.
+        // Keep the header bell badge (AppNavigator) in sync immediately. Only when every page is loaded:
+        // a partly loaded list would under-count (the badge's own 30 s check covers that case).
         useEffect(() => {
-            if (!loading) onUnreadCountChange?.(unreadCount);
-        }, [unreadCount, loading, onUnreadCountChange]);
+            if (!loading && !hasMore) onUnreadCountChange?.(unreadCount);
+        }, [unreadCount, loading, hasMore, onUnreadCountChange]);
 
         /**
          * Load notifications from Liferay (headless list + JSONWS text).
@@ -243,12 +297,12 @@ export const NotificationsScreen: React.FC<
                         setError(null);
                     }
 
-                    const fetchList = () =>
-                        notificationService.getNotifications(accessToken, refreshToken, onTokenRefresh);
+                    const fetchFirstPage = () =>
+                        notificationService.getNotificationsPage(accessToken, refreshToken, onTokenRefresh, 1);
                     // Shared query cache: reopened within 20 s = no request; pull-to-refresh always asks the server.
                     const result = isRefresh
-                        ? await refetchFresh(qk.notifications(), fetchList)
-                        : await fetchCached(qk.notifications(), fetchList, 20_000);
+                        ? await refetchFresh(qk.notifications(), fetchFirstPage)
+                        : await fetchCached(qk.notifications(), fetchFirstPage, 20_000);
 
                     // console.log(
                         // '[NotificationsScreen] Loaded',
@@ -257,7 +311,23 @@ export const NotificationsScreen: React.FC<
                         // result[0] ? JSON.stringify(result[0]).slice(0, 500) : 'none',
                     // );
 
-                    setNotifications(result);
+                    setTotalCount(result.totalCount);
+                    if (silent) {
+                        // Background refresh: new notifications on top, the older pages already loaded stay.
+                        setNotifications((current) => mergeFirstPage(current, withoutRemoved(result.items)));
+                        if (pageRef.current === 1) {
+                            hasMoreRef.current = result.hasMore;
+                            setHasMore(result.hasMore);
+                        }
+                    } else {
+                        // Open / pull-to-refresh: start again from page 1.
+                        listGenerationRef.current += 1;
+                        pageRef.current = 1;
+                        hasMoreRef.current = result.hasMore;
+                        setHasMore(result.hasMore);
+                        setLoadMoreError(null);
+                        setNotifications(withoutRemoved(result.items));
+                    }
                 } catch (err: any) {
                     console.warn('[NotificationsScreen] Failed to load notifications (status:', err?.status ?? 'error', ')');
                     if (silent) return; // keep the list on screen; the next tick tries again
@@ -282,23 +352,67 @@ export const NotificationsScreen: React.FC<
             tokenRef.current = accessToken;
         }, [accessToken]);
 
+        /**
+         * Next 50 (FlatList/SectionList onEndReached). One request at a time; an error keeps the list
+         * and shows a retry row; answers that arrive after a pull-to-refresh are ignored.
+         */
+        const loadMore = useCallback(async () => {
+            if (loadingMoreRef.current || !hasMoreRef.current || loading || refreshing || !tokenRef.current) return;
+            loadingMoreRef.current = true;
+            setLoadingMore(true);
+            setLoadMoreError(null);
+
+            const generation = listGenerationRef.current;
+            const nextPage = pageRef.current + 1;
+            try {
+                const result = await notificationService.getNotificationsPage(
+                    tokenRef.current,
+                    refreshToken,
+                    onTokenRefresh,
+                    nextPage,
+                );
+                if (generation !== listGenerationRef.current) return;
+                pageRef.current = nextPage;
+                hasMoreRef.current = result.hasMore;
+                setHasMore(result.hasMore);
+                setTotalCount(result.totalCount);
+                setNotifications((current) => appendUnique(current, withoutRemoved(result.items)));
+            } catch (err: any) {
+                console.warn('[NotificationsScreen] Failed to load more notifications (status:', err?.status ?? 'error', ')');
+                if (generation === listGenerationRef.current) {
+                    setLoadMoreError('Could not load more notifications.');
+                }
+            } finally {
+                loadingMoreRef.current = false;
+                setLoadingMore(false);
+            }
+        }, [loading, refreshing, refreshToken, onTokenRefresh]);
+
+        // After an error the list does not retry by itself on every scroll; the user taps "Retry".
+        const handleEndReached = useCallback(() => {
+            if (!loadMoreError) loadMore();
+        }, [loadMoreError, loadMore]);
+
         useEffect(() => {
             loadNotifications();
             // Load on open; pull-to-refresh reloads; the effect below keeps it fresh while open.
             // eslint-disable-next-line react-hooks/exhaustive-deps
         }, []);
 
-        // While this screen is open: refresh silently every 30 s and when the app returns to the foreground.
+        // While this screen is open, refresh silently only when needed: a push arrives (ask the server now),
+        // the app returns to the foreground, or the slow fallback timer fires (in case a push is lost).
         useEffect(() => {
             const timer = setInterval(() => {
                 loadNotifications(false, true);
-            }, 30_000);
+            }, SILENT_REFRESH_FALLBACK_MS);
             const sub = AppState.addEventListener('change', (next) => {
                 if (next === 'active') loadNotifications(false, true);
             });
+            const unsubPush = onPushReceived(() => loadNotifications(true, true));
             return () => {
                 clearInterval(timer);
                 sub.remove();
+                unsubPush();
             };
             // eslint-disable-next-line react-hooks/exhaustive-deps
         }, []);
@@ -309,8 +423,10 @@ export const NotificationsScreen: React.FC<
                 current.map((item) => (idSet.has(item.id) ? { ...item, read } : item)),
             );
             // Keep the shared cache in step, so reopening the screen never shows an old read/unread state.
-            queryClient.setQueryData<LiferayNotification[]>(qk.notifications(), (cur) =>
-                cur?.map((item) => (idSet.has(item.id) ? { ...item, read } : item)),
+            queryClient.setQueryData<NotificationPage>(qk.notifications(), (cur) =>
+                cur && Array.isArray(cur.items)
+                    ? { ...cur, items: cur.items.map((item) => (idSet.has(item.id) ? { ...item, read } : item)) }
+                    : cur,
             );
         }, []);
 
@@ -395,8 +511,122 @@ export const NotificationsScreen: React.FC<
 
         const sections = useMemo(() => groupByDate(filtered), [filtered]);
 
+        // ── Delete (single + selected), optimistic: removed at once, put back if the server refuses ──
+
+        const removeLocally = useCallback((ids: number[]) => {
+            const idSet = new Set(ids);
+            setNotifications((current) => current.filter((n) => !idSet.has(n.id)));
+            setTotalCount((count) => (count == null ? count : Math.max(0, count - ids.length)));
+            queryClient.setQueryData<NotificationPage>(qk.notifications(), (cur) =>
+                cur && Array.isArray(cur.items)
+                    ? {
+                        ...cur,
+                        items: cur.items.filter((n) => !idSet.has(n.id)),
+                        totalCount: Math.max(0, (cur.totalCount ?? 0) - ids.length),
+                    }
+                    : cur,
+            );
+        }, []);
+
+        const deleteItems = useCallback(
+            async (targets: LiferayNotification[]) => {
+                const items = targets.filter((n) => !removedIdsRef.current.has(n.id));
+                if (items.length === 0) return;
+                const ids = items.map((n) => n.id);
+
+                ids.forEach((id) => removedIdsRef.current.add(id));
+                removeLocally(ids);
+                setDeleting(true);
+                try {
+                    await notificationService.deleteNotifications(ids, tokenRef.current, refreshToken, onTokenRefresh);
+                } catch (err: any) {
+                    console.warn('[NotificationsScreen] Delete failed (status:', err?.status ?? 'error', ')');
+                    ids.forEach((id) => removedIdsRef.current.delete(id));
+                    setNotifications((current) => appendUnique(current, items).sort(byNewest));
+                    setTotalCount((count) => (count == null ? count : count + items.length));
+                    // Cache no longer matches the server: the next open asks the server again.
+                    queryClient.removeQueries({ queryKey: qk.notifications() });
+                    showBanner(
+                        items.length === 1
+                            ? 'Could not delete the notification. Please try again.'
+                            : 'Could not delete the selected notifications. Please try again.',
+                    );
+                } finally {
+                    setDeleting(false);
+                }
+            },
+            [refreshToken, onTokenRefresh, removeLocally, showBanner],
+        );
+
+        const confirmDelete = useCallback(
+            (targets: LiferayNotification[], onConfirmed?: () => void) => {
+                if (targets.length === 0) return;
+                const one = targets.length === 1;
+                Alert.alert(
+                    one ? 'Delete notification?' : `Delete ${targets.length} notifications?`,
+                    'This cannot be undone.',
+                    [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                            text: 'Delete',
+                            style: 'destructive',
+                            onPress: () => {
+                                onConfirmed?.();
+                                deleteItems(targets);
+                            },
+                        },
+                    ],
+                );
+            },
+            [deleteItems],
+        );
+
+        const exitSelection = useCallback(() => {
+            setSelectionMode(false);
+            setSelectedIds(new Set());
+        }, []);
+
+        const enterSelection = useCallback((id?: number) => {
+            setSelectionMode(true);
+            setSelectedIds(id == null ? new Set() : new Set([id]));
+        }, []);
+
+        const toggleSelected = useCallback((id: number) => {
+            setSelectedIds((current) => {
+                const next = new Set(current);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                return next;
+            });
+        }, []);
+
+        // Only what is on screen in the current tab counts (items removed by a refresh drop out by themselves).
+        const selectedItems = useMemo(
+            () => filtered.filter((n) => selectedIds.has(n.id)),
+            [filtered, selectedIds],
+        );
+        const allSelected = filtered.length > 0 && selectedItems.length === filtered.length;
+
+        const toggleSelectAll = useCallback(() => {
+            setSelectedIds(allSelected ? new Set() : new Set(filtered.map((n) => n.id)));
+        }, [allSelected, filtered]);
+
+        // Android back button leaves selection mode first.
+        useEffect(() => {
+            if (!selectionMode) return;
+            const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+                exitSelection();
+                return true;
+            });
+            return () => sub.remove();
+        }, [selectionMode, exitSelection]);
+
         const filterCount = (key: FilterKey): number =>
-            key === 'unread' ? unreadCount : key === 'read' ? readCount : notifications.length;
+            key === 'unread'
+                ? unreadCount
+                : key === 'read'
+                    ? readCount
+                    : Math.max(notifications.length, totalCount ?? 0);
 
         /**
          * Render one notification card.
@@ -407,6 +637,7 @@ export const NotificationsScreen: React.FC<
             const tone = getNotificationTone(title, message);
             const isUnread = !item.read;
             const isPending = pendingIds.has(item.id);
+            const isSelected = selectionMode && selectedIds.has(item.id);
 
             // Action link from <a> tag, payload, or HATEOAS actions
             const linkInfo = extractNotificationLink(item.message, item.payload, item.actions);
@@ -421,31 +652,49 @@ export const NotificationsScreen: React.FC<
             return (
                 <Pressable
                     onPress={() => {
+                        if (selectionMode) {
+                            toggleSelected(item.id);
+                            return;
+                        }
                         markOneAsRead(item);
                         openAction();
                     }}
-                    accessibilityRole="button"
+                    onLongPress={selectionMode ? undefined : () => enterSelection(item.id)}
+                    accessibilityRole={selectionMode ? 'checkbox' : 'button'}
+                    accessibilityState={selectionMode ? { checked: isSelected } : undefined}
                     accessibilityLabel={`${isUnread ? 'Unread' : 'Read'} notification: ${title}. ${message}`}
+                    accessibilityHint={selectionMode ? undefined : 'Long press to select'}
                     style={({ pressed }) => [
                         styles.card,
                         isUnread ? styles.cardUnread : styles.cardRead,
+                        isSelected && styles.cardSelected,
                         pressed && styles.cardPressed,
                     ]}
                 >
                     {isUnread ? <View style={styles.unreadAccent} /> : null}
 
-                    <View
-                        style={[
-                            styles.iconCircle,
-                            { backgroundColor: isUnread ? tone.bg : colors.concreteLighter },
-                        ]}
-                    >
-                        <Ionicons
-                            name={tone.icon}
-                            size={20}
-                            color={isUnread ? tone.fg : colors.neutralGray}
-                        />
-                    </View>
+                    {selectionMode ? (
+                        <View style={styles.iconCircle}>
+                            <Ionicons
+                                name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                                size={26}
+                                color={isSelected ? colors.primary : colors.neutralGray}
+                            />
+                        </View>
+                    ) : (
+                        <View
+                            style={[
+                                styles.iconCircle,
+                                { backgroundColor: isUnread ? tone.bg : colors.concreteLighter },
+                            ]}
+                        >
+                            <Ionicons
+                                name={tone.icon}
+                                size={20}
+                                color={isUnread ? tone.fg : colors.neutralGray}
+                            />
+                        </View>
+                    )}
 
                     <View style={styles.cardBody}>
                         <View style={styles.titleRow}>
@@ -477,6 +726,7 @@ export const NotificationsScreen: React.FC<
                                 </Text>
                             </View>
 
+                            <View style={styles.metaRight}>
                             {isUnread ? (
                                 <Pressable
                                     onPress={() => markOneAsRead(item)}
@@ -501,9 +751,21 @@ export const NotificationsScreen: React.FC<
                                     <Text style={styles.readTagText}>Read</Text>
                                 </View>
                             )}
+                            {!selectionMode ? (
+                                <Pressable
+                                    onPress={() => confirmDelete([item])}
+                                    hitSlop={8}
+                                    accessibilityRole="button"
+                                    accessibilityLabel="Delete notification"
+                                    style={({ pressed }) => [styles.deleteButton, pressed && styles.chipPressed]}
+                                >
+                                    <Ionicons name="trash-outline" size={16} color={colors.error} />
+                                </Pressable>
+                            ) : null}
+                            </View>
                         </View>
 
-                        {hasAction ? (
+                        {hasAction && !selectionMode ? (
                             <Pressable
                                 onPress={() => {
                                     markOneAsRead(item);
@@ -538,6 +800,64 @@ export const NotificationsScreen: React.FC<
         return (
             <View style={[styles.root, { paddingTop: insets.top }]}>
                 {/* Header */}
+                {selectionMode ? (
+                    <View style={styles.header}>
+                        <Pressable
+                            onPress={exitSelection}
+                            hitSlop={10}
+                            style={styles.backButton}
+                            accessibilityRole="button"
+                            accessibilityLabel="Cancel selection"
+                        >
+                            <Ionicons name="close" size={24} color={colors.textPrimary} />
+                        </Pressable>
+
+                        <View style={styles.headerTitleBlock}>
+                            <Text style={styles.headerTitle}>{selectedItems.length} selected</Text>
+                            {hasMore ? (
+                                <Text style={styles.headerSubtitle}>Of {filtered.length} loaded</Text>
+                            ) : null}
+                        </View>
+
+                        <Pressable
+                            onPress={toggleSelectAll}
+                            disabled={filtered.length === 0}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel={allSelected ? 'Deselect all' : 'Select all'}
+                            style={({ pressed }) => [styles.markAllButton, pressed && styles.chipPressed]}
+                        >
+                            <Ionicons
+                                name={allSelected ? 'square-outline' : 'checkbox-outline'}
+                                size={16}
+                                color={colors.primary}
+                            />
+                            <Text style={styles.markAllText}>{allSelected ? 'Deselect all' : 'Select all'}</Text>
+                        </Pressable>
+
+                        <Pressable
+                            onPress={() => confirmDelete(selectedItems, exitSelection)}
+                            disabled={selectedItems.length === 0 || deleting}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Delete selected"
+                            style={({ pressed }) => [
+                                styles.headerIconButton,
+                                pressed && styles.chipPressed,
+                            ]}
+                        >
+                            {deleting ? (
+                                <ActivityIndicator size="small" color={colors.error} />
+                            ) : (
+                                <Ionicons
+                                    name="trash-outline"
+                                    size={22}
+                                    color={selectedItems.length === 0 ? colors.disabled : colors.error}
+                                />
+                            )}
+                        </Pressable>
+                    </View>
+                ) : (
                 <View style={styles.header}>
                     <Pressable
                         onPress={onBack}
@@ -592,7 +912,23 @@ export const NotificationsScreen: React.FC<
                             </>
                         )}
                     </Pressable>
+
+                    <Pressable
+                        onPress={() => enterSelection()}
+                        disabled={loading || filtered.length === 0}
+                        hitSlop={8}
+                        accessibilityRole="button"
+                        accessibilityLabel="Select notifications"
+                        style={({ pressed }) => [styles.headerIconButton, pressed && styles.chipPressed]}
+                    >
+                        <Ionicons
+                            name="checkbox-outline"
+                            size={22}
+                            color={loading || filtered.length === 0 ? colors.disabled : colors.primary}
+                        />
+                    </Pressable>
                 </View>
+                )}
 
                 {/* Filter tabs */}
                 <View style={styles.filterBar}>
@@ -602,7 +938,10 @@ export const NotificationsScreen: React.FC<
                         return (
                             <Pressable
                                 key={key}
-                                onPress={() => setFilter(key)}
+                                onPress={() => {
+                                    setFilter(key);
+                                    setSelectedIds(new Set());
+                                }}
                                 accessibilityRole="tab"
                                 accessibilityState={{ selected: active }}
                                 style={[styles.filterTab, active && styles.filterTabActive]}
@@ -673,6 +1012,25 @@ export const NotificationsScreen: React.FC<
                         showsVerticalScrollIndicator={false}
                         refreshing={refreshing}
                         onRefresh={() => loadNotifications(true)}
+                        onEndReached={handleEndReached}
+                        onEndReachedThreshold={LOAD_MORE_THRESHOLD}
+                        ListFooterComponent={
+                            loadingMore ? (
+                                <View style={styles.listFooter}>
+                                    <ActivityIndicator size="small" color={colors.primary} />
+                                    <Text style={styles.listFooterText}>Loading more…</Text>
+                                </View>
+                            ) : loadMoreError ? (
+                                <Pressable onPress={loadMore} style={styles.listFooter} hitSlop={8}>
+                                    <Ionicons name="refresh" size={16} color={colors.primary} />
+                                    <Text style={[styles.listFooterText, styles.listFooterRetry]}>
+                                        {loadMoreError} Tap to retry
+                                    </Text>
+                                </Pressable>
+                            ) : !hasMore && notifications.length > 0 ? (
+                                <Text style={styles.listEndText}>You're all caught up</Text>
+                            ) : null
+                        }
                         ListEmptyComponent={
                             <View style={styles.center}>
                                 <View style={styles.emptyIconCircle}>
@@ -865,6 +1223,30 @@ const styles = StyleSheet.create({
     cardPressed: {
         opacity: 0.75,
     },
+    cardSelected: {
+        borderColor: colors.primary,
+        backgroundColor: colors.statBlueBg,
+    },
+    metaRight: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: spacing.sm,
+    },
+    deleteButton: {
+        width: 30,
+        height: 30,
+        borderRadius: radius.pill,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: colors.statRedBg,
+    },
+    headerIconButton: {
+        width: 40,
+        height: 40,
+        marginLeft: spacing.xs,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     unreadAccent: {
         position: 'absolute',
         left: 0,
@@ -991,6 +1373,27 @@ const styles = StyleSheet.create({
     },
 
     // States
+    listFooter: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+        paddingVertical: spacing.md,
+    },
+    listFooterText: {
+        ...typography.bodySmall,
+        color: colors.textSecondary,
+    },
+    listFooterRetry: {
+        color: colors.primary,
+        fontWeight: '600',
+    },
+    listEndText: {
+        ...typography.bodySmall,
+        color: colors.textPlaceholder,
+        textAlign: 'center',
+        paddingVertical: spacing.md,
+    },
     center: {
         flex: 1,
         alignItems: 'center',

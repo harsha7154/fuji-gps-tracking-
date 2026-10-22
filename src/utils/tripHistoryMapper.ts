@@ -76,10 +76,8 @@ export function mapDispatchToHistoryItem(dispatch: DispatchItem): TripHistoryIte
   const tripIdFormatted = rawId ? (rawId.startsWith('#') ? rawId : `#${rawId}`) : '—';
   const id = dispatch.dispatchID || String(dispatch.objectEntryId || dispatch.MaterialDispatchId || rawId);
 
-  // 2. Status resolution (DELIVERED vs IN TRANSIT)
-  // Strict rules:
-  // statusDispatch 0 -> DELIVERED
-  // statusDispatch 3 (or 1) -> IN TRANSIT
+  // 2. Status resolution (same codes as everywhere else, see utils/dispatchStatus.ts)
+  // statusDispatch 0 -> DELIVERED, 1 -> IN TRANSIT, 3 (journey not started) -> DISPATCHED
   const statusCode = resolveDispatchStatus(dispatch);
   const isDelivered =
     statusCode === DISPATCH_STATUS.ARRIVED ||
@@ -89,7 +87,11 @@ export function mapDispatchToHistoryItem(dispatch: DispatchItem): TripHistoryIte
     /^delivered$/i.test(dispatch.statusLabel ?? '') ||
     /^arrived$/i.test(dispatch.statusLabel ?? '');
 
-  const status: TripHistoryStatus = isDelivered ? 'DELIVERED' : 'IN TRANSIT';
+  const status: TripHistoryStatus = isDelivered
+    ? 'DELIVERED'
+    : statusCode === DISPATCH_STATUS.IN_TRANSIT
+      ? 'IN TRANSIT'
+      : 'DISPATCHED';
 
   // 3. Destination formatting (strictly from API)
   const siteName = (dispatch.siteName ?? '').trim();

@@ -63,8 +63,10 @@ export function refetchFresh<T>(key: readonly unknown[], fn: () => Promise<T>): 
 
 /** A journey just started / completed: whatever was cached about dispatches is out of date. */
 export function invalidateJourneyData(): void {
-  void queryClient.cancelQueries({ queryKey: ['active-dispatch'] });
-  queryClient.removeQueries({ queryKey: ['active-dispatch'] });
+  for (const root of ['active-dispatch', 'active-raw', 'dispatch-detail', 'ping-history']) {
+    void queryClient.cancelQueries({ queryKey: [root] });
+    queryClient.removeQueries({ queryKey: [root] });
+  }
   for (const root of ['dashboard', 'trip', 'trip-history']) {
     // Mark stale only (no immediate refetch): the next poll / screen open fetches fresh data.
     queryClient.invalidateQueries({ queryKey: [root], refetchType: 'none' });

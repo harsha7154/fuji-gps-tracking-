@@ -19,6 +19,7 @@ import { PrimaryButton } from '../components/PrimaryButton';
 import { useQuery } from '@tanstack/react-query';
 import { qk, queryClient } from '../query/queryClient';
 import { driverDashboardService } from '../services/driverDashboardService';
+import { onJourneyChanged } from '../services/driverGpsService';
 import type { UserProfile } from '../types/auth';
 import type { DispatchItem, DriverDashboardData, DriverWorkflowKey } from '../types/driverDashboard';
 import { DISPATCH_STATUS, getDispatchStatusLabel } from '../utils/dispatchStatus';
@@ -41,16 +42,18 @@ const STATUS_BADGE_COLORS: Record<number, { bg: string; text: string }> = {
 };
 const DEFAULT_STATUS_BADGE = { bg: colors.concreteLight, text: colors.textSecondary };
 
-/** While at least one dispatch is In Transit, re-fetch the list this often so Arrived (0) shows up on its own. */
-const DISPATCH_REFRESH_INTERVAL_MS = 10_000;
-
 /**
- * After a successful start-journey the backend may need a moment before the
- * list endpoint reports statusDispatch 1. For this long we keep showing
- * "In Transit" even if a refresh still says 3, so the Live GPS button doesn't
- * flicker back to "Activate Journey". After the grace period the server wins.
+ * The dispatch list is reloaded only when needed:
+ *  - screen opened and the cached list is older than this (younger = shown from cache, no request),
+ *  - pull-to-refresh, journey started / completed on this phone (onJourneyChanged),
+ *  - the shared active dispatch (refreshed by BackgroundGpsController) shows a status the list does not have,
+ *  - app back in the foreground with a list older than this.
  */
-const START_JOURNEY_GRACE_MS = 30_000;
+const DISPATCH_LIST_STALE_MS = 15_000;
+/** Safety net while a trip is In Transit (status changes made from the web). */
+const IN_TRANSIT_SAFETY_REFRESH_MS = 60_000;
+/** Minimum gap between two automatic reloads triggered by the active-dispatch status. */
+const AUTO_RELOAD_MIN_GAP_MS = 15_000;
 
 /**
  * Coverflow-style swiper for the "Completed Dispatches" section.
@@ -228,60 +231,13 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
   );
   const [activeTab, setActiveTab] = useState<DriverBottomTabKey>('dashboard');
 
-  // dispatchID -> time the driver successfully started it (see START_JOURNEY_GRACE_MS).
-  const recentlyStartedRef = useRef<Map<string, number>>(new Map());
-
-  // Subscribe to arrival confirmations so confirmed dispatches cleanly transition to completed
-  const [, setArrivalVersion] = useState(0);
-  useEffect(() => {
-    return arrivalConfirmationService.subscribe(() => {
-      setArrivalVersion((v) => v + 1);
-    });
-  }, []);
-
-  // Merge a fresh server list into state, honouring the start-journey grace window.
+  // The status shown is EXACTLY the Liferay dispatches API `statusDispatch`
+  // (0 = Arrived, 1 = In Transit, 3 = Dispatched). No local overrides.
   const applyServerDispatches = useCallback((items: DispatchItem[], full?: DriverDashboardData) => {
-    const now = Date.now();
-    const started = recentlyStartedRef.current;
-
-    const merged = items.map((item) => {
-      // An in-transit dispatch must NEVER prematurely flip to Arrived on server/Redis signals
-      // unless the driver has explicitly confirmed arrival.
-      const effectiveStatus = arrivalConfirmationService.getEffectiveStatus(
-        item.dispatchID,
-        item.statusDispatch
-      );
-      const withStatus: DispatchItem =
-        effectiveStatus !== item.statusDispatch
-          ? { ...item, statusDispatch: effectiveStatus, arrived: effectiveStatus === DISPATCH_STATUS.ARRIVED }
-          : item;
-
-      const startedAt = started.get(item.dispatchID);
-      if (startedAt === undefined) return withStatus;
-
-      const serverStillSaysDispatched = withStatus.statusDispatch === DISPATCH_STATUS.DISPATCHED;
-      if (!serverStillSaysDispatched || now - startedAt > START_JOURNEY_GRACE_MS) {
-        started.delete(item.dispatchID); // server has caught up (or grace expired) — trust it
-        return withStatus;
-      }
-      return { ...withStatus, statusDispatch: DISPATCH_STATUS.IN_TRANSIT };
-    });
-
-    setData((prev) => (prev ? { ...prev, dispatches: merged } : full ? { ...full, dispatches: merged } : prev));
+    setData((prev) => (prev ? { ...prev, dispatches: items } : full ? { ...full, dispatches: items } : prev));
   }, []);
 
-  const allDispatches = useMemo(() => {
-    return (data?.dispatches ?? []).map((d) => {
-      const effectiveStatus = arrivalConfirmationService.getEffectiveStatus(
-        d.dispatchID,
-        d.statusDispatch
-      );
-      if (effectiveStatus !== d.statusDispatch) {
-        return { ...d, statusDispatch: effectiveStatus, arrived: effectiveStatus === DISPATCH_STATUS.ARRIVED };
-      }
-      return d;
-    });
-  }, [data?.dispatches]);
+  const allDispatches = useMemo(() => data?.dispatches ?? [], [data?.dispatches]);
 
   // Filter into 2 distinct sections: Active vs Completed (statusDispatch 0 === Arrived).
   const { activeDispatches, completedDispatches } = useMemo(
@@ -300,7 +256,8 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
 
   // ONE query owns the dashboard data (React Query):
   //  - cached across screens and shared with every other caller of the same key (Live GPS, Profile, ...),
-  //  - polled every 10 s ONLY while a trip is in transit and ONLY while the app is in the foreground,
+  //  - NOT polled fast: reloaded only on the events listed at DISPATCH_LIST_STALE_MS
+  //    (+ a 2 min safety refresh while a trip is In Transit, foreground only),
   //  - refreshed when the app returns to the foreground (if the data is older than staleTime),
   //  - a failed refresh keeps the list that is on screen (no blanking on a transient network error).
   const accessTokenRef = useRef(accessToken);
@@ -308,15 +265,42 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
   const dashboardQuery = useQuery({
     queryKey: qk.dashboard(user.id),
     queryFn: () => driverDashboardService.fetchDashboard(String(user.id), accessTokenRef.current),
-    staleTime: 8_000,
-    refetchInterval: hasInTransit ? DISPATCH_REFRESH_INTERVAL_MS : false,
+    staleTime: DISPATCH_LIST_STALE_MS,
+    refetchInterval: hasInTransit ? IN_TRANSIT_SAFETY_REFRESH_MS : false,
     retry: 1,
   });
   const { refetch: refetchDashboard } = dashboardQuery;
+
+  // Journey started / completed on this phone: the list is out of date, reload it now.
+  useEffect(() => onJourneyChanged(() => {
+    refetchDashboard().catch(() => { });
+  }), [refetchDashboard]);
+
+  // Follow the shared active-dispatch copy (no request here): reload the full list only when the
+  // active dispatch is missing from it or has a different status.
+  const lastAutoReloadRef = useRef(0);
+  useEffect(() => {
+    const activeKey = qk.active(user.id);
+    return queryClient.getQueryCache().subscribe((event) => {
+      if (event.type !== 'updated' || event.action.type !== 'success') return;
+      const key = event.query.queryKey;
+      if (key[0] !== activeKey[0] || key[1] !== activeKey[1]) return;
+
+      const active = event.query.state.data as DispatchItem | undefined;
+      const list = queryClient.getQueryData<DriverDashboardData>(qk.dashboard(user.id))?.dispatches;
+      if (!active?.dispatchID || !list) return;
+
+      const inList = list.find((d) => d.dispatchID === active.dispatchID);
+      if (inList && inList.statusDispatch === active.statusDispatch) return;
+
+      const now = Date.now();
+      if (now - lastAutoReloadRef.current < AUTO_RELOAD_MIN_GAP_MS) return;
+      lastAutoReloadRef.current = now;
+      refetchDashboard().catch(() => { });
+    });
+  }, [user.id, refetchDashboard]);
   useEffect(() => {
     if (dashboardQuery.data) applyServerDispatches(dashboardQuery.data.dispatches ?? [], dashboardQuery.data);
-    // dataUpdatedAt (not data): every successful poll must re-run the start-journey grace merge,
-    // even when the server's list is unchanged.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dashboardQuery.dataUpdatedAt]);
 
@@ -333,21 +317,12 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
     }
   }, [refetchDashboard]);
 
-  // start-journey succeeded -> flip this card to In Transit right away (button becomes "Live GPS").
+  // start-journey succeeded: the server already has status 1 -> reload the list from Liferay now
+  // (the journey-changed event also triggers it; React Query shares the single request).
   const handleJourneyStarted = useCallback((dispatchId: string) => {
-    recentlyStartedRef.current.set(dispatchId, Date.now());
-    arrivalConfirmationService.markInTransit(dispatchId);
-    setData((prev) =>
-      prev
-        ? {
-          ...prev,
-          dispatches: prev.dispatches.map((d) =>
-            d.dispatchID === dispatchId ? { ...d, statusDispatch: DISPATCH_STATUS.IN_TRANSIT } : d
-          ),
-        }
-        : prev
-    );
-  }, []);
+    arrivalConfirmationService.markInTransit(dispatchId); // GPS arrival logic only, not the display
+    refetchDashboard().catch(() => { });
+  }, [refetchDashboard]);
 
   const openLiveGps = useCallback(
     (dispatchId?: string, objectEntryId?: number | string) => {

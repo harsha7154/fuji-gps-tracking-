@@ -156,7 +156,7 @@ export const DriverTripHistoryScreen: React.FC<DriverTripHistoryScreenProps> = (
         const uid: string = effectiveUserId;
         const tok = effectiveToken;
         const startedAt = Date.now();
-        const dispatches = await driverDashboardService.getDispatches(uid, tok, isPullToRefresh ? 0 : 20_000);
+        const dispatches = await driverDashboardService.getDispatches(uid, tok, isPullToRefresh ? 0 : 60_000);
         const summary = mapDispatchesToTripHistory(dispatches, dispatches.length);
         console.log(`[HISTORY] ${dispatches.length} trip(s) loaded + mapped in ${Date.now() - startedAt}ms`);
 

@@ -20,7 +20,18 @@ export const TripHistoryCard: React.FC<TripHistoryCardProps> = ({
   onViewDetails,
   onReceiptPdf,
 }) => {
-  const isInTransit = item.status === 'IN TRANSIT';
+  const badgeStyle =
+    item.status === 'DELIVERED'
+      ? styles.statusBadgeDelivered
+      : item.status === 'IN TRANSIT'
+        ? styles.statusBadgeInTransit
+        : styles.statusBadgeDispatched;
+  const badgeTextStyle =
+    item.status === 'DELIVERED'
+      ? styles.statusTextDelivered
+      : item.status === 'IN TRANSIT'
+        ? styles.statusTextInTransit
+        : styles.statusTextDispatched;
 
   const handleActionPress = () => {
     if (item.actionType === 'viewDetails') {
@@ -35,18 +46,8 @@ export const TripHistoryCard: React.FC<TripHistoryCardProps> = ({
       {/* Top Row: Trip ID & Status Badge */}
       <View style={styles.topRow}>
         <Text style={styles.tripIdText}>{item.tripIdFormatted}</Text>
-        <View
-          style={[
-            styles.statusBadge,
-            isInTransit ? styles.statusBadgeInTransit : styles.statusBadgeDelivered,
-          ]}
-        >
-          <Text
-            style={[
-              styles.statusBadgeText,
-              isInTransit ? styles.statusTextInTransit : styles.statusTextDelivered,
-            ]}
-          >
+        <View style={[styles.statusBadge, badgeStyle]}>
+          <Text style={[styles.statusBadgeText, badgeTextStyle]}>
             {item.status}
           </Text>
         </View>
@@ -128,6 +129,9 @@ const styles = StyleSheet.create({
   statusBadgeDelivered: {
     backgroundColor: '#DCFCE7',
   },
+  statusBadgeDispatched: {
+    backgroundColor: '#E3F0FA',
+  },
   statusBadgeText: {
     fontSize: 11,
     fontWeight: '700',
@@ -135,6 +139,9 @@ const styles = StyleSheet.create({
   },
   statusTextInTransit: {
     color: '#D97706',
+  },
+  statusTextDispatched: {
+    color: '#0B5FA8',
   },
   statusTextDelivered: {
     color: '#16A34A',

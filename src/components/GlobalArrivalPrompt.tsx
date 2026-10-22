@@ -3,21 +3,24 @@ import { ActivityIndicator, AppState, Modal, Pressable, StyleSheet, Text, View }
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 
-import { driverGpsService, formatLiveGps, JourneyError } from '../services/driverGpsService';
+import { driverGpsService } from '../services/driverGpsService';
+import { getPendingPod, savePendingPod, subscribePendingPod } from '../services/pendingPodService';
 import type { DispatchItem } from '../types/driverDashboard';
 import { ensureForegroundLocationPermission } from '../utils/currentLocation';
-import { getDeviceId } from '../utils/deviceId';
 import { DISPATCH_STATUS } from '../utils/dispatchStatus';
 import { arrivalConfirmationService } from '../services/arrivalConfirmationService';
 import { gpsLog, gpsWarn } from '../utils/gpsLogger';
+import { qk, queryClient } from '../query/queryClient';
 import { colors, radius, spacing, typography } from '../theme';
 
 // Same numbers as DriverGpsTrackingScreen so behaviour is identical on every screen.
 const ARRIVAL_RADIUS_M = 100;
 const ARRIVAL_EXIT_RADIUS_M = 125;
-const ARRIVAL_REPROMPT_MS = 10_000;
-// How often we re-check which dispatch is In Transit.
-const DISPATCH_REFRESH_MS = 15_000;
+const ARRIVAL_REPROMPT_MS = 5_000;
+// A shared active-dispatch copy this young is reused when the popup (re)starts.
+// No timer of its own: BackgroundGpsController keeps the shared copy current and this
+// component follows every update of it (see the cache subscription below).
+const SHARED_MAX_AGE_MS = 60_000;
 const MAX_FIX_AGE_MS = 8000;
 
 function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -39,22 +42,22 @@ interface GlobalArrivalPromptProps {
   enabled: boolean;
   userId?: string | null;
   accessToken?: string | null;
-  /** Called after complete-journey succeeded, so the app can open the tracking screen. */
-  onJourneyCompleted: (dispatchId: string, objectEntryId?: number | string) => void;
+  /** Driver tapped "Confirm": the app opens the POD screen (journey completes after the POD upload). */
+  onArrivalConfirmed: (dispatchId: string, objectEntryId?: number | string) => void;
 }
 
 /**
  * "Destination arrived?" popup that appears on ANY screen.
  *
  * While the driver has an In Transit dispatch it watches the phone's GPS. Within 100 m of the
- * site it shows the popup; "Not yet" asks again after 10 s while still inside the zone;
- * "Arrived" calls complete-journey.
+ * site it shows the popup; "Not yet" asks again every 5 s while still inside the zone;
+ * "Confirm" saves the arrival and opens the POD screen (complete-journey runs after the POD upload).
  */
 export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
   enabled,
   userId,
   accessToken,
-  onJourneyCompleted,
+  onArrivalConfirmed,
 }) => {
   const [dispatch, setDispatch] = useState<DispatchItem | null>(null);
   const [visible, setVisible] = useState(false);
@@ -73,13 +76,16 @@ export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
   const dismissedAtRef = useRef(0);
   const visibleRef = useRef(false);
   const completingRef = useRef(false);
+  // Arrival already confirmed, POD pending (persisted): no popup until the journey is completed.
+  const podPendingRef = useRef(false);
+  const repromptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setPromptVisible = useCallback((v: boolean) => {
     visibleRef.current = v;
     setVisible(v);
   }, []);
 
-  // ── 1. Find the In Transit dispatch (re-checked every 15 s) ──────────────
+  // ── 1. Find the In Transit dispatch (follows the shared active-dispatch cache) ──
   useEffect(() => {
     if (!enabled || !userId) {
       setDispatch(null);
@@ -89,44 +95,56 @@ export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
 
     let cancelled = false;
 
+    const apply = (active: DispatchItem | null) => {
+      if (cancelled) return;
+      const effectiveStatus = active
+        ? arrivalConfirmationService.getEffectiveStatus(active.dispatchID, active.statusDispatch)
+        : undefined;
+
+      const inTransit =
+        active &&
+        effectiveStatus === DISPATCH_STATUS.IN_TRANSIT &&
+        Number(active.destinationLatitude) &&
+        Number(active.destinationLongitude);
+
+      setDispatch((prev) => {
+        const next = inTransit ? (active as DispatchItem) : null;
+        if (prev?.dispatchID === next?.dispatchID) return prev; // keep watcher running
+        gpsLog('[GlobalArrival] active dispatch', { dispatch: next?.dispatchID ?? null });
+        return next;
+      });
+    };
+
     const load = async () => {
       // A hidden app has no popup to show: skip the request (it re-checks the moment the app is visible again).
       if (AppState.currentState !== 'active') return;
       try {
         const token = tokenRef.current ?? undefined;
         // Shared with BackgroundGpsController and the Live GPS screen: one request, not three.
-        const active = await driverGpsService.getActiveWithDetail(userId, token, DISPATCH_REFRESH_MS - 1000);
-        if (cancelled) return;
-
-        const effectiveStatus = active
-          ? arrivalConfirmationService.getEffectiveStatus(active.dispatchID, active.statusDispatch)
-          : undefined;
-
-        const inTransit =
-          active &&
-          effectiveStatus === DISPATCH_STATUS.IN_TRANSIT &&
-          Number(active.destinationLatitude) &&
-          Number(active.destinationLongitude);
-
-        setDispatch((prev) => {
-          const next = inTransit ? (active as DispatchItem) : null;
-          if (prev?.dispatchID === next?.dispatchID) return prev; // keep watcher running
-          gpsLog('[GlobalArrival] active dispatch', { dispatch: next?.dispatchID ?? null });
-          return next;
-        });
+        apply(await driverGpsService.getActiveWithDetail(userId, token, SHARED_MAX_AGE_MS));
       } catch (err) {
         gpsWarn('[GlobalArrival] could not load active dispatch', { err: String(err) });
       }
     };
 
+    // Follow the shared active-dispatch copy: whenever anyone refreshes it, re-evaluate (no request here).
+    const activeKey = qk.active(userId);
+    const unsubCache = queryClient.getQueryCache().subscribe((event) => {
+      if (event.type !== 'updated') return;
+      const key = event.query.queryKey;
+      if (key[0] !== activeKey[0] || key[1] !== activeKey[1]) return;
+      if (event.action.type === 'success') apply((event.query.state.data as DispatchItem) ?? null);
+      // "No active dispatch" is reported as an error by getActiveWithDetail (never cached as data).
+      else if (event.action.type === 'error') apply(null);
+    });
+
     load();
-    const timer = setInterval(load, DISPATCH_REFRESH_MS);
     const appStateSub = AppState.addEventListener('change', (state) => {
       if (state === 'active') load();
     });
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      unsubCache();
       appStateSub.remove();
     };
   }, [enabled, userId, setPromptVisible]);
@@ -155,7 +173,7 @@ export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
         if (dismissedRef.current && Date.now() - dismissedAtRef.current >= ARRIVAL_REPROMPT_MS) {
           dismissedRef.current = false;
         }
-        if (!dismissedRef.current && !visibleRef.current && !completingRef.current) {
+        if (!dismissedRef.current && !visibleRef.current && !completingRef.current && !podPendingRef.current) {
           gpsLog('[GlobalArrival] POPUP shown', { distM: Math.round(meters), dispatch: dispatchKey });
           setPromptVisible(true);
         }
@@ -200,6 +218,34 @@ export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
     };
   }, [enabled, dispatchKey, destLat, destLng, setPromptVisible]);
 
+  // Pending POD of this driver: hide the popup and keep it hidden until the journey is completed.
+  useEffect(() => {
+    if (!userId) {
+      podPendingRef.current = false;
+      return;
+    }
+    const uid = String(userId);
+    const apply = (pending: unknown) => {
+      podPendingRef.current = Boolean(pending);
+      if (pending && visibleRef.current) setPromptVisible(false);
+    };
+    let active = true;
+    getPendingPod(uid).then((p) => {
+      if (active) apply(p);
+    });
+    const unsub = subscribePendingPod((changedUser, p) => {
+      if (changedUser === uid) apply(p);
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, [userId, setPromptVisible]);
+
+  useEffect(() => () => {
+    if (repromptTimerRef.current) clearTimeout(repromptTimerRef.current);
+  }, []);
+
   // ── Buttons ──────────────────────────────────────────────────────────────
   const handleNotYet = useCallback(() => {
     if (completingRef.current) return;
@@ -207,8 +253,21 @@ export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
     dismissedAtRef.current = Date.now();
     setError(null);
     setPromptVisible(false);
+    // Ask again after ARRIVAL_REPROMPT_MS even without a new GPS fix (truck standing still).
+    if (repromptTimerRef.current) clearTimeout(repromptTimerRef.current);
+    repromptTimerRef.current = setTimeout(() => {
+      repromptTimerRef.current = null;
+      if (!dismissedRef.current || !zoneActiveRef.current || podPendingRef.current) return;
+      if (visibleRef.current || completingRef.current) return;
+      dismissedRef.current = false;
+      setPromptVisible(true);
+    }, ARRIVAL_REPROMPT_MS);
   }, [setPromptVisible]);
 
+  /**
+   * "Confirm": the journey is NOT completed here. The confirmation (dispatch + position within 100 m)
+   * is saved and the driver goes to the POD screen; complete-journey runs after the POD upload.
+   */
   const handleArrived = useCallback(async () => {
     if (completingRef.current || !dispatch) return;
     const objectEntryId = dispatch.MaterialDispatchId ?? dispatch.objectEntryId;
@@ -221,57 +280,35 @@ export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
       setError('Waiting for a GPS fix...');
       return;
     }
+    if (!userId) {
+      setError('Please sign in again.');
+      return;
+    }
 
     completingRef.current = true;
     setCompleting(true);
     setError(null);
     try {
-      const deviceId = await getDeviceId();
-      console.log('[GlobalArrivalPrompt] Requesting completeJourney:', {
+      await savePendingPod({
+        userId: String(userId),
         dispatchId: dispatch.dispatchID,
-        objectEntryId,
+        objectEntryId: String(objectEntryId),
+        latitude: at[0],
+        longitude: at[1],
+        confirmedAt: Date.now(),
       });
-      await driverGpsService.completeJourney(
-        { objectEntryId, deviceId, liveGPS: formatLiveGps(at[0], at[1]) },
-        tokenRef.current ?? undefined
-      );
-      gpsLog('[GlobalArrival] complete-journey ok', { dispatch: dispatch.dispatchID });
-      arrivalConfirmationService.confirmArrival(dispatch.dispatchID);
-      if (objectEntryId !== undefined) {
-        arrivalConfirmationService.confirmArrival(objectEntryId);
-      }
-      console.log('[GlobalArrivalPrompt] completeJourney ok. Dispatch arrived:', {
-        dispatchId: dispatch.dispatchID,
-        objectEntryId,
-      });
+      gpsLog('[GlobalArrival] arrival confirmed -> POD screen', { dispatch: dispatch.dispatchID, objectEntryId });
+      if (repromptTimerRef.current) clearTimeout(repromptTimerRef.current);
       setPromptVisible(false);
-      setDispatch(null); // stops the GPS watcher
-      const completedDispatchId = dispatch.dispatchID || String(objectEntryId);
-      console.log('[GlobalArrivalPrompt] Immediately before arrival confirmation callback:', {
-        selectedDispatchId: completedDispatchId,
-        objectEntryId,
-        distanceM,
-        arrivalState: {
-          radiusM: ARRIVAL_RADIUS_M,
-          exitRadiusM: ARRIVAL_EXIT_RADIUS_M,
-          zoneActive: zoneActiveRef.current,
-          distanceM,
-        },
-        navigationDecision: 'Journey complete succeeded; invoking onJourneyCompleted callback to route driver to tracking and reveal POD flow',
-      });
-      onJourneyCompleted(completedDispatchId, objectEntryId);
-      console.log('[GlobalArrivalPrompt] Immediately after arrival confirmation callback:', {
-        selectedDispatchId: completedDispatchId,
-        objectEntryId,
-        navigationDecision: 'onJourneyCompleted callback completed',
-      });
+      onArrivalConfirmed(dispatch.dispatchID || String(objectEntryId), objectEntryId);
     } catch (err) {
-      setError(err instanceof JourneyError ? err.message : 'Could not complete the journey. Please try again.');
+      gpsWarn('[GlobalArrival] could not save the confirmation', { err: String(err) });
+      setError('Could not save the confirmation. Please try again.');
     } finally {
       completingRef.current = false;
       setCompleting(false);
     }
-  }, [dispatch, distanceM, onJourneyCompleted, setPromptVisible]);
+  }, [dispatch, userId, onArrivalConfirmed, setPromptVisible]);
 
   const siteName = dispatch?.siteName || dispatch?.destinationSiteAWC || 'Anganwadi Site';
 
@@ -293,7 +330,8 @@ export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
           <Text style={styles.site}>{siteName}</Text>
           <Text style={styles.body}>
             {distanceM !== null ? `You are ${formatDistance(distanceM)} from the site. ` : ''}
-            Have you arrived? Tap "Arrived" to complete this journey.
+            Have you arrived? Tap "Confirm" to upload the proof of delivery. The journey is completed
+            after the photo is uploaded.
           </Text>
 
           <View style={styles.tripRow}>
@@ -325,13 +363,13 @@ export const GlobalArrivalPrompt: React.FC<GlobalArrivalPromptProps> = ({
               onPress={handleArrived}
               disabled={completing}
               accessibilityRole="button"
-              accessibilityLabel="Arrived, complete the journey"
+              accessibilityLabel="Confirm arrival and upload proof of delivery"
               style={({ pressed }) => [styles.button, styles.confirm, pressed && styles.dim]}
             >
               {completing ? (
                 <ActivityIndicator color={colors.white} />
               ) : (
-                <Text style={styles.confirmText}>{error ? 'Try Again' : 'Arrived'}</Text>
+                <Text style={styles.confirmText}>{error ? 'Try Again' : 'Confirm'}</Text>
               )}
             </Pressable>
           </View>

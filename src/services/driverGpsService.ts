@@ -132,6 +132,33 @@ export function formatLiveGps(latitude: number, longitude: number): string {
   return `${latitude},${longitude}`;
 }
 
+// ── Journey changed event ────────────────────────────────────────────────────
+// Fired after start-journey / complete-journey succeed. Pollers (dashboard, background GPS,
+// arrival popup) re-check right away on this event instead of polling fast all the time.
+export type JourneyChange = 'started' | 'completed';
+const journeyListeners = new Set<(change: JourneyChange) => void>();
+
+function emitJourneyChanged(change: JourneyChange): void {
+  // After the caller's own state update (the screen that pressed the button goes first).
+  setTimeout(() => {
+    journeyListeners.forEach((listener) => {
+      try {
+        listener(change);
+      } catch (err) {
+        console.warn('[driverGpsService] journey listener failed:', err);
+      }
+    });
+  }, 0);
+}
+
+/** Subscribe to start / complete journey. Returns the unsubscribe function. */
+export function onJourneyChanged(listener: (change: JourneyChange) => void): () => void {
+  journeyListeners.add(listener);
+  return () => {
+    journeyListeners.delete(listener);
+  };
+}
+
 /** Shared POST for start-journey / complete-journey (all params in the query string). */
 async function postJourney(
   path: 'start-journey' | 'complete-journey',
@@ -183,6 +210,7 @@ async function postJourney(
   console.log(`[driverGpsService] ${path} ok:`, JSON.stringify(body));
   // The dispatch just changed state: nothing cached before this moment may be served again.
   clearJourneyCaches();
+  emitJourneyChanged(path === 'start-journey' ? 'started' : 'completed');
   return {
     success: true,
     message: typeof body?.message === 'string' ? body.message : undefined,
@@ -202,6 +230,8 @@ let healthCache: { at: number; value: GpsHealthResponse | null } | null = null;
 let healthInFlight: Promise<GpsHealthResponse | null> | null = null;
 const HEALTH_OK_TTL_MS = 30_000;
 const HEALTH_FAIL_TTL_MS = 10_000;
+/** Same dispatch request from different screens within this time = ONE network call. */
+const SHARED_STALE_MS = 15_000;
 
 function clearJourneyCaches(): void {
   invalidateJourneyData();
@@ -246,6 +276,23 @@ export const driverGpsService = {
     return peekQuery<DispatchItem>(qk.active(userId)) ?? null;
   },
 
+  /**
+   * Is Liferay reachable? Used only when a screen got no data, to tell "no internet / server down"
+   * apart from "nothing to show". Any answer below 500 (even 401) means the server is up.
+   */
+  async isServerReachable(accessToken?: string): Promise<boolean> {
+    try {
+      const response = await fetchWithTimeout(
+        `${getBaseUrl()}/o/mobile-auth/me`,
+        { headers: authHeaders(accessToken) },
+        6_000,
+      );
+      return response.status < 500;
+    } catch {
+      return false;
+    }
+  },
+
   /** Drop the shared copies (pull-to-refresh / Retry want the server's answer, not a cached one). */
   invalidateCaches(): void {
     clearJourneyCaches();
@@ -256,7 +303,20 @@ export const driverGpsService = {
    * GET /o/material-dispatch-rest/driver/active-dispatch?userId={driverUserId}[&dispatchId=][&driverName=]
    * Returns null when the driver has no active dispatch (or on failure).
    */
-  async fetchActiveDispatch(
+  fetchActiveDispatch(
+    params: { userId: string | number; dispatchId?: string; driverName?: string },
+    accessToken?: string,
+  ): Promise<ActiveDispatchResponse | null> {
+    // One shared answer per user (+ dispatch) for 15 s, for every screen and background job.
+    return fetchCached(
+      ['active-raw', String(params.userId), params.dispatchId ?? 'current', params.driverName ?? ''],
+      () => this.loadActiveDispatch(params, accessToken),
+      SHARED_STALE_MS,
+    ).catch(() => null);
+  },
+
+  /** Network call behind fetchActiveDispatch (use fetchActiveDispatch). */
+  async loadActiveDispatch(
     params: { userId: string | number; dispatchId?: string; driverName?: string },
     accessToken?: string,
   ): Promise<ActiveDispatchResponse | null> {
@@ -317,7 +377,21 @@ export const driverGpsService = {
    * One dispatch (incl. pingHistory).
    * GET /o/material-dispatch-rest/dispatch/{objectEntryId}?userId={driverUserId}
    */
-  async fetchDispatchDetail(
+  fetchDispatchDetail(
+    objectEntryId: number | string,
+    userId: string | number,
+    accessToken?: string,
+  ): Promise<DispatchItem | null> {
+    // One shared answer per dispatch for 15 s (Live GPS, My Trip, POD, active dispatch).
+    return fetchCached(
+      ['dispatch-detail', String(userId), String(objectEntryId)],
+      () => this.loadDispatchDetail(objectEntryId, userId, accessToken),
+      SHARED_STALE_MS,
+    ).catch(() => null);
+  },
+
+  /** Network call behind fetchDispatchDetail (use fetchDispatchDetail). */
+  async loadDispatchDetail(
     objectEntryId: number | string,
     userId: string | number,
     accessToken?: string,
@@ -346,15 +420,16 @@ export const driverGpsService = {
 
             // 2. Search dispatches list
             const dispatches = await driverDashboardService.getDispatches(String(userId), accessToken);
-            const cleanTarget = String(objectEntryId).replace(/\D/g, '');
-            const matched = dispatches.find((d: DispatchItem) => {
-              if (!d) return false;
-              if (d.dispatchID === String(objectEntryId)) return true;
-              if (d.dispatchID?.toLowerCase() === String(objectEntryId).toLowerCase()) return true;
-              if (cleanTarget && d.dispatchID && d.dispatchID.replace(/\D/g, '') === cleanTarget) return true;
-              if (String(d.MaterialDispatchId) === String(objectEntryId) || String(d.objectEntryId) === String(objectEntryId)) return true;
-              return false;
-            }) ?? (dispatches.length === 1 ? dispatches[0] : null);
+            // Exact id match only, in the driver's own list (no "digits only" / "the only item" guess)
+            const target = String(objectEntryId).toLowerCase();
+            const matched =
+              dispatches.find(
+                (d: DispatchItem) =>
+                  !!d &&
+                  (d.dispatchID?.toLowerCase() === target ||
+                    String(d.MaterialDispatchId) === String(objectEntryId) ||
+                    String(d.objectEntryId) === String(objectEntryId))
+              ) ?? null;
 
             const genuineId = matched?.MaterialDispatchId ?? matched?.objectEntryId;
             if (genuineId !== undefined && String(genuineId) !== String(objectEntryId)) {
@@ -385,7 +460,16 @@ export const driverGpsService = {
    * GET /o/material-dispatch-rest/history/{dispatchId}
    * Accepts a plain array or an object wrapping one. Returns [] on failure.
    */
-  async fetchPingHistory(dispatchId: string, accessToken?: string): Promise<DispatchPingHistoryItem[]> {
+  fetchPingHistory(dispatchId: string, accessToken?: string): Promise<DispatchPingHistoryItem[]> {
+    return fetchCached(
+      ['ping-history', String(dispatchId)],
+      () => this.loadPingHistory(dispatchId, accessToken),
+      SHARED_STALE_MS,
+    ).catch(() => []);
+  },
+
+  /** Network call behind fetchPingHistory (use fetchPingHistory). */
+  async loadPingHistory(dispatchId: string, accessToken?: string): Promise<DispatchPingHistoryItem[]> {
     try {
       const url = `${getBaseUrl()}${DISPATCH_REST}/history/${encodeURIComponent(dispatchId)}`;
       const response = await fetchWithTimeout(url, { headers: authHeaders(accessToken) }, REQUEST_TIMEOUT_MS);

@@ -26,6 +26,11 @@ interface DriverPodScreenProps {
   selectedDispatchId?: string;
   objectEntryId?: string | number;
   initialTripSummary?: PodTripSummary | null;
+  /**
+   * Arrival confirmed, journey not completed yet. When the photo is already on the server
+   * (e.g. after an app restart) the button completes the journey instead of uploading again.
+   */
+  journeyCompletionPending?: boolean;
 }
 
 /**
@@ -54,6 +59,7 @@ export const DriverPodScreen: React.FC<DriverPodScreenProps> = ({
   selectedDispatchId,
   objectEntryId,
   initialTripSummary,
+  journeyCompletionPending = false,
 }) => {
   const [tripSummary, setTripSummary] = useState<PodTripSummary | null>(initialTripSummary ?? null);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -142,11 +148,13 @@ export const DriverPodScreen: React.FC<DriverPodScreenProps> = ({
 
   const hasPhotos = capturedPhotos.length > 0;
   const latestPhoto = hasPhotos ? capturedPhotos[capturedPhotos.length - 1] : null;
-  const canSubmit = hasPhotos && !isAlreadySubmitted;
+  // Photo already uploaded but the journey is still open: only "Complete Journey" is left.
+  const completeOnly = isAlreadySubmitted && journeyCompletionPending;
+  const canSubmit = (hasPhotos && !isAlreadySubmitted) || completeOnly;
 
   const handleSubmit = useCallback(async () => {
     // Prevent duplicate taps and submissions
-    if (!canSubmit || isSubmitting || inFlightSubmitRef.current || isAlreadySubmitted) {
+    if (!canSubmit || isSubmitting || inFlightSubmitRef.current || (isAlreadySubmitted && !completeOnly)) {
       return;
     }
     inFlightSubmitRef.current = true;
@@ -181,7 +189,7 @@ export const DriverPodScreen: React.FC<DriverPodScreenProps> = ({
       inFlightSubmitRef.current = false;
       setIsSubmitting(false);
     }
-  }, [canSubmit, isSubmitting, isAlreadySubmitted, onSubmit, tripSummary, selectedDispatchId, objectEntryId, capturedPhotos.length]);
+  }, [canSubmit, completeOnly, isSubmitting, isAlreadySubmitted, onSubmit, tripSummary, selectedDispatchId, objectEntryId, capturedPhotos.length]);
 
   const handleTabPress = useCallback(
     (tab: DriverBottomTabKey) => {
@@ -383,7 +391,7 @@ export const DriverPodScreen: React.FC<DriverPodScreenProps> = ({
           ) : null}
 
           {/* Submit Action */}
-          {isAlreadySubmitted ? (
+          {isAlreadySubmitted && !completeOnly ? (
             <View style={styles.submitButtonDisabledContainer}>
               <View style={styles.submitButtonSubmitted}>
                 <Ionicons name="checkmark-done-circle" size={20} color="#16A34A" />
@@ -404,7 +412,13 @@ export const DriverPodScreen: React.FC<DriverPodScreenProps> = ({
                 <Ionicons name="checkmark-circle-outline" size={18} color={colors.white} />
               )}
               <Text style={styles.submitButtonText}>
-                {isSubmitting ? 'Submitting Proof of Delivery...' : 'Submit Proof of Delivery (POD) →'}
+                {completeOnly
+                  ? isSubmitting
+                    ? 'Completing Journey...'
+                    : 'Complete Journey →'
+                  : isSubmitting
+                    ? 'Submitting Proof of Delivery...'
+                    : 'Submit Proof of Delivery (POD) →'}
               </Text>
             </Pressable>
           )}

@@ -8,7 +8,8 @@ import { DriverBottomTabBar, DriverBottomTabKey } from '../components/DriverBott
 import { GoogleRouteMap } from '../components/GoogleRouteMap';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { driverDashboardService } from '../services/driverDashboardService';
-import { driverGpsService, formatLiveGps, JourneyError } from '../services/driverGpsService';
+import { driverGpsService } from '../services/driverGpsService';
+import { getPendingPod, PendingPod, savePendingPod, subscribePendingPod } from '../services/pendingPodService';
 import { GpsSocketStatus, GpsWebSocket } from '../services/gpsWebSocketService';
 import { GpsLiveSocket, LiveSocketStatus } from '../services/gpsLiveSocketService';
 import {
@@ -22,6 +23,7 @@ import { ensureForegroundLocationPermission } from '../utils/currentLocation';
 import { getDeviceId } from '../utils/deviceId';
 import { DISPATCH_STATUS, resolveDispatchStatus } from '../utils/dispatchStatus';
 import { arrivalConfirmationService } from '../services/arrivalConfirmationService';
+import { StatusAnimation } from '../components/StatusAnimation';
 import { gpsFixLog, gpsLog, gpsWarn } from '../utils/gpsLogger';
 import { decidePing, HEARTBEAT_MS, LastSentPing, MIN_MOVE_METERS, PING_INTERVAL_MS } from '../utils/pingGate';
 import { parseLatLngString } from '../utils/routeGeometry';
@@ -38,6 +40,16 @@ const LOAD_DEADLINE_MS = 20_000;
 // Last resolved dispatch per driver, kept in memory: re-opening the Live GPS tab shows the map
 // instantly and the fresh data replaces it a moment later (stale-while-revalidate).
 const gpsDispatchCache = new Map<string, { dispatch: DispatchItem; history: [number, number][] }>();
+
+/** A refresh that brings back the same data must not touch the map (no flicker, no route rebuild). */
+function sameData(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
 
 function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -66,9 +78,9 @@ const ARRIVAL_EXIT_RADIUS_M = 125;
 
 // "Destination arrived" popup is shown CONTINUOUSLY while the driver is in the arrival zone:
 // it opens at <= ARRIVAL_RADIUS_M and keeps coming back (this long after every "Not yet")
-// until the driver is farther than ARRIVAL_EXIT_RADIUS_M, or taps "Arrived".
+// until the driver is farther than ARRIVAL_EXIT_RADIUS_M, or taps "Confirm".
 // Works even when the start point and the destination are < 20 m apart.
-const ARRIVAL_REPROMPT_MS = 10_000;
+const ARRIVAL_REPROMPT_MS = 5_000;
 
 // A position read back from the GPS service older than this is not shown as live
 // (same 2 minutes as the web tracker's "signal lost").
@@ -225,6 +237,10 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
   // Arrival confirmation (<= 100 m from the site).
   const [withinArrivalZone, setWithinArrivalZone] = useState<boolean>(false);
   const [arrivalPromptVisible, setArrivalPromptVisible] = useState<boolean>(false);
+  // Arrival confirmed, proof of delivery not finished yet (persisted, see pendingPodService).
+  const [pendingPod, setPendingPod] = useState<PendingPod | null>(null);
+  const podPendingRef = useRef<boolean>(false);
+  const repromptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The token is refreshed periodically by AppNavigator. Reading it through a ref keeps the
   // GPS watcher / socket running across refreshes instead of tearing them down and restarting.
@@ -298,6 +314,8 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
 
   // Which picture the map draws.
   const mapPhase = isArrived ? 'arrived' : isTracking ? 'inTransit' : 'planned';
+  // The map (and its route request) is shown only after "Activate Journey": In Transit or Arrived.
+  const isJourneyActivated = isTracking || isArrived;
 
   // ── 1. Resolve which dispatch we're tracking ────────────────────────────────
   // Speed rules (a slow Liferay used to leave this screen on "Loading dispatch..." for minutes):
@@ -312,8 +330,8 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
     const cacheKey = `${userId}|${initialDispatchId ?? ''}`;
     const cached = userId ? gpsDispatchCache.get(cacheKey) : undefined;
     if (cached) {
-      setDispatch(cached.dispatch);
-      setStoredHistory(cached.history);
+      setDispatch((prev) => (sameData(prev, cached.dispatch) ? prev : cached.dispatch));
+      setStoredHistory((prev) => (sameData(prev, cached.history) ? prev : cached.history));
       // Only trust cached ARRIVED if driver confirmed in this session.
       const cachedStatus =
         driverConfirmedArrivalRef.current && isInitiallyArrived
@@ -329,7 +347,7 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
       setLoadError(null);
     }
 
-    const matchesInitial = (d: any, lenient: boolean): boolean => {
+    const matchesInitial = (d: any, _lenient?: boolean): boolean => {
       if (!d || !initialDispatchId) return false;
       if (d.dispatchID === initialDispatchId) return true;
       if (d.dispatchID?.toLowerCase() === initialDispatchId.toLowerCase()) return true;
@@ -342,10 +360,12 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
       ) {
         return true;
       }
-      const cleanInitialId = initialDispatchId.replace(/\D/g, '');
-      if (cleanInitialId && d.dispatchID && String(d.dispatchID).replace(/\D/g, '') === cleanInitialId) return true;
-      return lenient && isInitiallyArrived;
+      return false;
     };
+
+    // The backend marks the driver's own records with driverUserId; another driver's record is never shown.
+    const isOwn = (d: any): boolean =>
+      d?.driverUserId === undefined || d?.driverUserId === null || d?.driverUserId === '' || String(d.driverUserId) === userId;
 
     // INSTANT PAINT: GlobalArrivalPrompt / BackgroundGpsController already keep a fresh copy of the
     // driver's active dispatch (site position + stored route). If it is the dispatch we were asked
@@ -355,8 +375,9 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
       const peeked = driverGpsService.peekActiveWithDetail(userId);
       if (peeked && (!initialDispatchId || matchesInitial(peeked, false))) {
         seeded = true;
-        setDispatch(peeked);
-        setStoredHistory(toHistoryCoords(peeked.pingHistory));
+        setDispatch((prev) => (sameData(prev, peeked) ? prev : peeked));
+        const peekedHistory = toHistoryCoords(peeked.pingHistory);
+        setStoredHistory((prev) => (sameData(prev, peekedHistory) ? prev : peekedHistory));
         // Only trust peeked ARRIVED if driver confirmed in this session.
         const peekedStatus =
           driverConfirmedArrivalRef.current && isInitiallyArrived
@@ -391,144 +412,49 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
       return { chosen, history: toHistoryCoords(base.pingHistory) };
     };
 
+    // Only the logged-in driver's ACTIVE dispatch is shown here (otherwise "No active dispatch").
+    // Every call goes through the shared caches, so data another screen loaded is reused, not re-asked.
     const resolveOnce = async (): Promise<{ chosen: DispatchItem | null; history: [number, number][] }> => {
       const token = accessTokenRef.current;
       let chosen: DispatchItem | null = null;
 
-      // FAST PATH 1 — we were opened for a dispatch whose Liferay entry id we already know:
-      // ONE request (dispatch/{id}) returns the site position and the stored route. No full list download.
-      const knownEntryId =
-        initialObjectEntryId !== undefined &&
-        String(initialObjectEntryId) !== String(initialDispatchId) &&
-        /^\d+$/.test(String(initialObjectEntryId))
-          ? initialObjectEntryId
-          : undefined;
-      if (knownEntryId !== undefined) {
-        const detail = await driverGpsService.fetchDispatchDetail(knownEntryId, userId, token);
-        if (detail && detail.dispatchID && matchesInitial(detail, true)) {
-          return fromFullRecord({
-            ...detail,
-            MaterialDispatchId: detail.MaterialDispatchId ?? Number(knownEntryId),
-            objectEntryId: detail.MaterialDispatchId ?? detail.objectEntryId ?? Number(knownEntryId),
-          });
-        }
-        // Detail missing or for another dispatch: continue with the full resolution below.
+      // 1. The driver's own active dispatch with its detail (shared with My Trip, arrival prompt, GPS controller).
+      const active = await driverGpsService.getActiveWithDetail(userId, token, 14_000);
+      if (active && active.dispatchID && isOwn(active) && (!initialDispatchId || matchesInitial(active))) {
+        chosen = active;
       }
 
-      // FAST PATH 2 — opened from the tab bar (no dispatch given): the shared active dispatch
-      // (already merged with its detail) is the answer; the full list is not needed.
-      if (!initialDispatchId) {
-        const act = await driverGpsService.getActiveWithDetail(userId, token, 14_000);
-        if (act && act.dispatchID) return fromFullRecord(act);
-      }
-
-      // The active dispatch and the driver's list do not depend on each other: ask both at once.
-      const [active, items] = await Promise.all([
-        driverGpsService
-          .fetchActiveDispatch(initialDispatchId ? { userId, dispatchId: initialDispatchId } : { userId }, token)
-          .catch(() => null),
-        driverDashboardService.getDispatches(userId, token).catch(() => [] as DispatchItem[]),
-      ]);
-
-      if (initialDispatchId) {
-        // (fetchActiveDispatch already falls back to the unfiltered query by itself.)
-        if (active && matchesInitial(active, true)) chosen = active;
-        const matchedFromList = items.find((d) => matchesInitial(d, false)) ?? null;
-        if (chosen && matchedFromList) {
-          chosen = {
-            ...matchedFromList,
-            ...chosen,
-            MaterialDispatchId: matchedFromList.MaterialDispatchId ?? chosen.MaterialDispatchId,
-            objectEntryId:
-              matchedFromList.MaterialDispatchId ??
-              (matchedFromList.objectEntryId !== undefined &&
-              !String(matchedFromList.objectEntryId).toUpperCase().startsWith('DSP-') &&
-              /^\d+$/.test(String(matchedFromList.objectEntryId))
-                ? matchedFromList.objectEntryId
-                : chosen.MaterialDispatchId ??
-                  (chosen.objectEntryId !== undefined &&
-                  !String(chosen.objectEntryId).toUpperCase().startsWith('DSP-') &&
-                  /^\d+$/.test(String(chosen.objectEntryId))
-                    ? chosen.objectEntryId
-                    : undefined)),
-            statusDispatch:
-              driverConfirmedArrivalRef.current && (
-                isInitiallyArrived ||
-                chosen.statusDispatch === DISPATCH_STATUS.ARRIVED ||
-                matchedFromList.statusDispatch === DISPATCH_STATUS.ARRIVED
-              )
-                ? DISPATCH_STATUS.ARRIVED
-                : (chosen.statusDispatch === DISPATCH_STATUS.ARRIVED || matchedFromList.statusDispatch === DISPATCH_STATUS.ARRIVED) && !driverConfirmedArrivalRef.current
-                  ? DISPATCH_STATUS.IN_TRANSIT  // keep tracking; popup fires when GPS puts driver in zone
-                  : chosen.statusDispatch ?? matchedFromList.statusDispatch,
-            arrived: (driverConfirmedArrivalRef.current && (isInitiallyArrived || chosen.arrived || matchedFromList.arrived)) || false,
-          };
-        } else if (!chosen) {
-          chosen = matchedFromList;
-        }
-      } else {
-        chosen =
-          active ??
-          items.find(
-            (d) => d.statusDispatch === DISPATCH_STATUS.IN_TRANSIT || d.statusDispatch === DISPATCH_STATUS.ARRIVED
-          ) ??
-          items[0] ??
-          null;
-      }
-
-      if (chosen) {
-        const before = chosen;
-        chosen = await driverDashboardService
-          .enrichDispatchIdentifiers(before, userId, token)
-          .catch(() => before);
-      }
-
-      // GET dispatch/{objectEntryId}?userId= — full record (site position) + stored pingHistory.
-      let history: [number, number][] = [];
-      const effectiveEntryId =
-        chosen?.MaterialDispatchId ??
-        (chosen?.objectEntryId !== undefined && String(chosen?.objectEntryId) !== String(chosen?.dispatchID)
-          ? chosen.objectEntryId
-          : initialObjectEntryId !== undefined && String(initialObjectEntryId) !== String(initialDispatchId)
-            ? initialObjectEntryId
-            : undefined);
-      console.log('[DriverGpsTrackingScreen] Selected dispatch identifiers:', {
-        initialDispatchId,
-        initialObjectEntryId,
-        resolvedDispatchID: chosen?.dispatchID,
-        MaterialDispatchId: chosen?.MaterialDispatchId,
-        objectEntryId: chosen?.objectEntryId,
-        effectiveEntryId,
-      });
-      if (effectiveEntryId !== undefined) {
-        const detail = await driverGpsService.fetchDispatchDetail(effectiveEntryId, userId, token);
-        if (detail) {
-          const detailStatus = resolveDispatchStatus(detail);
-          chosen = {
-            ...(chosen ?? {}),
-            ...detail,
-            MaterialDispatchId: detail.MaterialDispatchId ?? chosen?.MaterialDispatchId,
-            objectEntryId: detail.MaterialDispatchId ?? detail.objectEntryId ?? chosen?.objectEntryId,
-            statusDispatch:
-              driverConfirmedArrivalRef.current && (
-                isInitiallyArrived ||
-                chosen?.statusDispatch === DISPATCH_STATUS.ARRIVED ||
-                detailStatus === DISPATCH_STATUS.ARRIVED
-              )
-                ? DISPATCH_STATUS.ARRIVED
-                : detailStatus === DISPATCH_STATUS.ARRIVED && !driverConfirmedArrivalRef.current
-                  ? DISPATCH_STATUS.IN_TRANSIT  // keep tracking; popup fires when in range
-                  : detailStatus ?? chosen?.statusDispatch,
-            arrived: (driverConfirmedArrivalRef.current && (isInitiallyArrived || chosen?.arrived || detail.arrived)) || false,
-          } as DispatchItem;
-          history = toHistoryCoords(detail.pingHistory);
+      // 2. Opened for a specific dispatch of this driver that is not the "current" one: only if it is
+      //    still active (Dispatched / In Transit), or it was just completed and is waiting for its POD.
+      if (!chosen && initialDispatchId) {
+        const items = await driverDashboardService.getDispatches(userId, token).catch(() => [] as DispatchItem[]);
+        const item = items.find((d) => matchesInitial(d)) ?? null;
+        const allowed =
+          !!item &&
+          isOwn(item) &&
+          (item.statusDispatch !== DISPATCH_STATUS.ARRIVED || isInitiallyArrived);
+        if (item && allowed) {
+          const entryId = item.MaterialDispatchId ?? item.objectEntryId;
+          const detail =
+            entryId !== undefined && String(entryId) !== String(item.dispatchID)
+              ? await driverGpsService.fetchDispatchDetail(entryId, userId, token)
+              : null;
+          chosen = detail && isOwn(detail) ? { ...item, ...detail, objectEntryId: detail.objectEntryId ?? item.objectEntryId } : item;
         }
       }
-      if (isInitiallyArrived && chosen) {
-        chosen.statusDispatch = DISPATCH_STATUS.ARRIVED;
-        chosen.arrived = true;
+
+      if (!chosen) {
+        // Nothing came back: either really no active dispatch, or no internet / server / API down.
+        if (!(await driverGpsService.isServerReachable(token))) throw new Error('OFFLINE');
+        return { chosen: null, history: [] };
       }
-      return { chosen, history };
+
+      const result = fromFullRecord(chosen);
+      if (isInitiallyArrived) {
+        result.chosen.statusDispatch = DISPATCH_STATUS.ARRIVED;
+        result.chosen.arrived = true;
+      }
+      return result;
     };
 
     (async () => {
@@ -553,7 +479,7 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
             siteMasterObjectEntryId: chosen.siteMasterObjectEntryId,
           });
         }
-        if (history.length > 0 || !hasInstant) setStoredHistory(history);
+        if (history.length > 0 || !hasInstant) setStoredHistory((prev) => (sameData(prev, history) ? prev : history));
         // Only mark as ARRIVED from the loaded dispatch if driver already confirmed this session.
         const isConfirmedArrival =
           driverConfirmedArrivalRef.current &&
@@ -569,7 +495,7 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
           chosen.statusDispatch = resolvedStatus;
           chosen.arrived = resolvedStatus === DISPATCH_STATUS.ARRIVED;
         }
-        setDispatch(chosen);
+        setDispatch((prev) => (sameData(prev, chosen) ? prev : chosen));
         setStatusDispatch(resolvedStatus);
         console.log('[DriverGpsTrackingScreen] Updated arrival state and POD visibility condition:', {
           dispatchId: chosen?.dispatchID,
@@ -591,7 +517,7 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
             .then((pings) => {
               const coords = toHistoryCoords(pings);
               if (!isMounted || coords.length === 0) return;
-              setStoredHistory(coords);
+              setStoredHistory((prev) => (sameData(prev, coords) ? prev : coords));
               const entry = gpsDispatchCache.get(cacheKey);
               if (entry) gpsDispatchCache.set(cacheKey, { ...entry, history: coords });
             })
@@ -602,9 +528,11 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
         // With a cached copy on screen keep showing it; only a first load shows the error.
         if (isMounted && !hasInstant) {
           setLoadError(
-            err instanceof Error && err.message === 'DEADLINE'
-              ? 'The server is taking too long to respond. Check your connection and tap Retry.'
-              : 'Unable to load dispatch details. Tap Retry.'
+            err instanceof Error && err.message === 'OFFLINE'
+              ? 'No internet connection, or the server is not responding. Check your connection and tap Retry.'
+              : err instanceof Error && err.message === 'DEADLINE'
+                ? 'The server is taking too long to respond. Check your connection and tap Retry.'
+                : 'Unable to load dispatch details. Tap Retry.'
           );
         }
       } finally {
@@ -631,60 +559,91 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
   }, []);
 
   // ── complete-journey (only after the driver confirms in the arrival popup) ──
-  const completeJourney = useCallback(
+  // Pending proof of delivery for this driver + dispatch: no popup, "Continue" button instead.
+  useEffect(() => {
+    const uid = user?.id;
+    if (!uid || !dispatchKey) {
+      podPendingRef.current = false;
+      setPendingPod(null);
+      return;
+    }
+    const apply = (p: PendingPod | null) => {
+      const mine = p && p.dispatchId === dispatchKey ? p : null;
+      podPendingRef.current = Boolean(mine);
+      setPendingPod(mine);
+      if (mine) {
+        arrivalPromptVisibleRef.current = false;
+        setArrivalPromptVisible(false);
+      }
+    };
+    let active = true;
+    getPendingPod(uid).then((p) => {
+      if (active) apply(p);
+    });
+    const unsub = subscribePendingPod((changedUser, p) => {
+      if (changedUser === String(uid)) apply(p);
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, [user?.id, dispatchKey]);
+
+  useEffect(() => () => {
+    if (repromptTimerRef.current) clearTimeout(repromptTimerRef.current);
+  }, []);
+
+  /**
+   * "Confirm" in the arrival popup: the journey is NOT completed here. The confirmation (dispatch +
+   * position within 100 m) is saved and the driver goes to the POD screen. complete-journey runs
+   * only after the POD photo is uploaded (AppNavigator.handleDriverPodSubmit).
+   */
+  const confirmArrivalForPod = useCallback(
     async (coord?: [number, number] | null) => {
       if (completingRef.current) return;
-      if (objectEntryId === undefined) {
+      if (objectEntryId === undefined || !dispatchKey) {
         setCompleteError('This dispatch is missing its ID (MaterialDispatchId). Please go back and reopen it.');
         return;
       }
       const at = coord ?? lastDeviceGpsRef.current;
       if (!at) {
-        setCompleteError('Waiting for a GPS fix before completing the journey...');
+        setCompleteError('Waiting for a GPS fix...');
+        return;
+      }
+      if (!user?.id) {
+        setCompleteError('Please sign in again.');
         return;
       }
 
       completingRef.current = true;
       setCompleting(true);
       setCompleteError(null);
-      gpsLog('COMPLETE-JOURNEY request', { dispatch: dispatchKey, objectEntryId, liveGPS: formatLiveGps(at[0], at[1]) });
       try {
-        const deviceId = deviceIdRef.current ?? (await getDeviceId());
-        await driverGpsService.completeJourney(
-          { objectEntryId, deviceId, liveGPS: formatLiveGps(at[0], at[1]) },
-          accessTokenRef.current
-        );
-        gpsLog('COMPLETE-JOURNEY ok -> stopping pings, closing WebSocket', { dispatch: dispatchKey });
-        // Driver confirmed -> allow the status flip, close popup, stop tracking.
-        if (dispatchKey) arrivalConfirmationService.confirmArrival(dispatchKey);
-        if (objectEntryId !== undefined) arrivalConfirmationService.confirmArrival(objectEntryId);
-        driverConfirmedArrivalRef.current = true;
+        await savePendingPod({
+          userId: user.id,
+          dispatchId: dispatchKey,
+          objectEntryId: String(objectEntryId),
+          latitude: at[0],
+          longitude: at[1],
+          confirmedAt: Date.now(),
+        });
+        gpsLog('ARRIVAL confirmed -> POD screen (journey completes after the POD upload)', {
+          dispatch: dispatchKey,
+          objectEntryId,
+        });
+        if (repromptTimerRef.current) clearTimeout(repromptTimerRef.current);
         arrivalPromptVisibleRef.current = false;
         setArrivalPromptVisible(false);
-        setStatusDispatch(DISPATCH_STATUS.ARRIVED);
-        setDispatch((prev) => (prev ? { ...prev, statusDispatch: DISPATCH_STATUS.ARRIVED, arrived: true } : prev));
-        console.log('[DriverGpsTrackingScreen] Immediately after arrival confirmation callback:', {
-          selectedDispatchId: dispatchKey,
-          objectEntryId,
-          statusDispatch: DISPATCH_STATUS.ARRIVED,
-          isArrived: true,
-          withinArrivalZone,
-          navigationDecision: 'Journey completed successfully on server. POD button is now visible (isArrived === true). Awaiting driver tap to navigate to DriverPod.',
-        });
+        onArrivedProceedToPod(dispatchKey, objectEntryId);
       } catch (err) {
-        gpsWarn('COMPLETE-JOURNEY failed -> pings KEEP running, driver can retry', {
-          dispatch: dispatchKey,
-          err: err instanceof Error ? err.message : String(err),
-        });
-        setCompleteError(
-          err instanceof JourneyError ? err.message : 'Could not complete the journey. Please try again.'
-        );
+        gpsWarn('ARRIVAL confirm could not be saved', { err: err instanceof Error ? err.message : String(err) });
+        setCompleteError('Could not save the confirmation. Please try again.');
       } finally {
         completingRef.current = false;
         setCompleting(false);
       }
     },
-    [objectEntryId, dispatchKey, withinArrivalZone]
+    [objectEntryId, dispatchKey, user?.id, onArrivedProceedToPod]
   );
 
   // Popup buttons.
@@ -697,14 +656,14 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
       arrivalCoord: arrivalCoordRef.current,
       isArrived,
       statusDispatch,
-      navigationDecision: 'User confirmed arrival in popup; triggering completeJourney to update arrived state and display POD button',
+      navigationDecision: 'User confirmed arrival in popup; opening POD upload (complete-journey after upload)',
     });
-    gpsLog('ARRIVAL-POPUP driver tapped ARRIVED -> calling complete-journey', {
+    gpsLog('ARRIVAL-POPUP driver tapped CONFIRM -> POD upload', {
       dispatch: dispatchKey,
       objectEntryId,
     });
-    completeJourney(arrivalCoordRef.current ?? lastDeviceGpsRef.current);
-  }, [completeJourney, dispatchKey, distanceToSiteM, isArrived, objectEntryId, statusDispatch, withinArrivalZone]);
+    confirmArrivalForPod(arrivalCoordRef.current ?? lastDeviceGpsRef.current);
+  }, [confirmArrivalForPod, dispatchKey, distanceToSiteM, isArrived, objectEntryId, statusDispatch, withinArrivalZone]);
 
   const handleCancelArrival = useCallback(() => {
     if (completingRef.current) return;
@@ -714,7 +673,17 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
     setArrivalPromptVisible(false);
     setCompleteError(null);
     if (dispatchKey) arrivalConfirmationService.markInTransit(dispatchKey);
-    gpsLog('ARRIVAL-POPUP driver tapped NOT YET -> pings continue', { dispatch: dispatchKey });
+    gpsLog('ARRIVAL-POPUP driver tapped NOT YET -> asking again in 5 s', { dispatch: dispatchKey });
+    // Ask again after ARRIVAL_REPROMPT_MS even if no new GPS fix arrives (truck standing still).
+    if (repromptTimerRef.current) clearTimeout(repromptTimerRef.current);
+    repromptTimerRef.current = setTimeout(() => {
+      repromptTimerRef.current = null;
+      if (!arrivalPromptDismissedRef.current || podPendingRef.current || completingRef.current) return;
+      if (!arrivalZoneActiveRef.current || arrivalPromptVisibleRef.current) return;
+      arrivalPromptDismissedRef.current = false;
+      arrivalPromptVisibleRef.current = true;
+      setArrivalPromptVisible(true);
+    }, ARRIVAL_REPROMPT_MS);
   }, [dispatchKey]);
 
   // "Complete Journey" button shown while at the site after Cancel.
@@ -737,7 +706,7 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
         arrivalPromptDismissedRef.current &&
         Date.now() - arrivalDismissedAtRef.current < ARRIVAL_REPROMPT_MS;
       gpsLog('ARRIVAL hint (' + source + ')', { dispatch: dispatchKey, recentlyDismissed });
-      if (!completingRef.current && !arrivalPromptVisibleRef.current && !recentlyDismissed) {
+      if (!completingRef.current && !arrivalPromptVisibleRef.current && !recentlyDismissed && !podPendingRef.current) {
         gpsLog('ARRIVAL hint -> showing popup for driver confirmation (no auto-complete)', { source });
         arrivalPromptVisibleRef.current = true;
         setArrivalPromptVisible(true);
@@ -796,7 +765,12 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
           arrivalPromptDismissedRef.current = false;
         }
 
-        if (!arrivalPromptDismissedRef.current && !arrivalPromptVisibleRef.current && !completingRef.current) {
+        if (
+          !arrivalPromptDismissedRef.current &&
+          !arrivalPromptVisibleRef.current &&
+          !completingRef.current &&
+          !podPendingRef.current
+        ) {
           gpsLog('ARRIVAL-POPUP shown', { distM: Math.round(meters), radiusM: ARRIVAL_RADIUS_M, dispatch: dispatchKey });
           arrivalPromptVisibleRef.current = true;
           setArrivalPromptVisible(true);
@@ -1200,9 +1174,7 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
     ? new Date(lastPingAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
     : '--:--:--';
 
-  // What the map card shows. The MAP IS ALWAYS MOUNTED (Google tiles start downloading at once);
-  // dispatch data, route and truck are fed into it as they arrive. One GoogleRouteMap instance
-  // lives for the whole visit, so nothing is re-created when the data lands.
+ 
   const renderMapContent = () => {
     if (loadError && !dispatch) {
       return (
@@ -1245,14 +1217,12 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
             vehicleNumber={vehicleNumber}
           />
         ) : (
-          <GoogleRouteMap
-            dispatchKey="no-active-dispatch"
-            phase="planned"
-            destCoord={[0, 0]}
-            liveCoord={[0, 0]}
-          />
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text style={styles.emptyStateText}>Loading dispatch…</Text>
+          </View>
         )}
-        {loading ? (
+        {loading && dispatch && !refreshing ? (
           <View style={styles.mapLoadingBadge} pointerEvents="none">
             <ActivityIndicator size="small" color="#FFFFFF" />
             <Text style={styles.mapLoadingBadgeText}>Loading dispatch…</Text>
@@ -1293,6 +1263,8 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
             <Text style={styles.backLinkText}>Back to Dashboard</Text>
           </Pressable>
 
+          {dispatch ? (
+          <>
           <View style={styles.titleRow}>
             <View style={styles.headerTitleBlock}>
               <Text style={styles.title}>Live GPS Tracking</Text>
@@ -1333,7 +1305,28 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
               <Text style={styles.errorBannerText}>GPS error: {watchError}</Text>
             </View>
           ) : null}
+          </>
+          ) : null}
 
+          {!dispatch && loading ? (
+            <StatusAnimation kind="loading" title="Loading your dispatch…" />
+          ) : !dispatch && loadError ? (
+            <StatusAnimation
+              kind="offline"
+              title="Can't reach the server"
+              message={loadError}
+              onRetry={handleRetryLoad}
+            />
+          ) : !dispatch ? (
+            <View style={styles.noDispatchCard}>
+              <Ionicons name="navigate-circle-outline" size={44} color={colors.textSecondary} />
+              <Text style={styles.noDispatchTitle}>No active dispatch</Text>
+              <Text style={styles.emptyStateText}>
+                You have no dispatch in progress. Live GPS appears here when a dispatch assigned to you is active.
+              </Text>
+            </View>
+          ) : (
+          <>
           {/* ── Route Info Header Card ── */}
           <View style={styles.routeHeaderCard}>
             {dispatch?.plantName ? (
@@ -1361,10 +1354,21 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
             </View>
           </View>
 
-          {/* ── Map: plant (red) / site (green) / truck, travelled gray, remaining blue ── */}
-          <View style={styles.mapCard}>
-            {renderMapContent()}
-          </View>
+          {/* ── Map: plant (red) / site (green) / truck, travelled gray, remaining blue ──
+               Only after the journey is activated; before that a short hint replaces it. */}
+          {isJourneyActivated ? (
+            <View style={styles.mapCard}>
+              {renderMapContent()}
+            </View>
+          ) : (
+            <View style={styles.noDispatchCard}>
+              <Ionicons name="map-outline" size={44} color={colors.textSecondary} />
+              <Text style={styles.noDispatchTitle}>Journey not started</Text>
+              <Text style={styles.emptyStateText}>
+                The live map appears once you tap "Activate Journey" on the dashboard for this dispatch.
+              </Text>
+            </View>
+          )}
 
           {/* ── Telemetry Stats Card ── */}
           <View style={styles.telemetryCard}>
@@ -1459,6 +1463,21 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
               }}
               style={styles.proceedButton}
             />
+          ) : pendingPod ? (
+            <View style={styles.atSiteCard}>
+              <View style={styles.atSiteHeader}>
+                <Ionicons name="camera" size={18} color={colors.statGreenIcon} />
+                <Text style={styles.atSiteTitle}>Proof of delivery pending</Text>
+              </View>
+              <Text style={styles.atSiteText}>
+                Upload the proof of delivery photo to complete this journey. Live GPS keeps running until then.
+              </Text>
+              <PrimaryButton
+                label="Continue to Proof of Delivery (POD) →"
+                onPress={() => onArrivedProceedToPod(pendingPod.dispatchId, pendingPod.objectEntryId)}
+                style={styles.atSiteButton}
+              />
+            </View>
           ) : isTracking && withinArrivalZone ? (
             <View style={styles.atSiteCard}>
               <View style={styles.atSiteHeader}>
@@ -1476,14 +1495,6 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
                 style={styles.atSiteButton}
               />
             </View>
-          ) : statusDispatch === DISPATCH_STATUS.DISPATCHED ? (
-            <View style={styles.infoCard}>
-              <Ionicons name="information-circle" size={18} color={colors.statBlueIcon} />
-              <Text style={styles.infoCardText}>
-                The map shows the route from the plant to the site. The truck appears when you tap "Activate
-                Journey" on the dashboard.
-              </Text>
-            </View>
           ) : isTracking ? (
             <View style={styles.infoCard}>
               <Ionicons name="information-circle" size={18} color={colors.statBlueIcon} />
@@ -1493,6 +1504,8 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
               </Text>
             </View>
           ) : null}
+          </>
+          )}
 
           <View style={styles.bottomSpacer} />
         </View>
@@ -1502,7 +1515,7 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
 
       {/* ── You have reached the site (<= 100 m) ── */}
       <Modal
-        visible={arrivalPromptVisible && isTracking}
+        visible={arrivalPromptVisible && isTracking && !pendingPod}
         transparent
         animationType="fade"
         statusBarTranslucent
@@ -1520,7 +1533,8 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
               {distanceToSiteM !== null
                 ? `You are ${formatDistance(distanceToSiteM)} from the site. `
                 : ''}
-              Tap "Confirm" to complete this journey. Live GPS keeps running until you do.
+              Tap "Confirm" to upload the proof of delivery. The journey is completed after the photo is
+              uploaded; Live GPS keeps running until then.
             </Text>
 
             <View style={styles.modalTripRow}>
@@ -1834,6 +1848,22 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
   infoCardText: { ...typography.bodySmall, color: colors.statBlueIcon, flex: 1 },
+  noDispatchCard: {
+    alignItems: 'center',
+    paddingVertical: spacing.xl,
+    paddingHorizontal: spacing.md,
+    marginTop: spacing.md,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  noDispatchTitle: {
+    ...typography.body,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginTop: spacing.sm,
+  },
   emptyStateText: {
     ...typography.bodySmall,
     color: colors.textSecondary,

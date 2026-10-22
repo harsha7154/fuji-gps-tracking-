@@ -1,9 +1,20 @@
 /**
- * Liferay user notifications — two sources merged into one list.
+ * Liferay user notifications.
+ *
+ * 0. List (preferred): the app's own backend, read from the database
+ *      GET {base}/o/mobile-auth/notifications?page=&pageSize=
+ *    -> { items: [{ id, read, dateCreated, eventType, payload }], totalCount, lastPage, unreadCount }
+ *    Each item already carries its payload, so no per-item lookups are needed.
+ *    Liferay's headless list (below) reads the SEARCH INDEX and answers 404 for the whole
+ *    page when the index still holds a deleted notification; it is only used when the
+ *    backend endpoint is not deployed (404).
  *
  * 1. Headless User Notification API (list, read state, mark as read)
  *      GET {base}/o/headless-user-notification/v1.0/my-user-notifications
  *      PUT {base}/o/headless-user-notification/v1.0/user-notifications/{id}/read
+ *    Delete (single / selected) goes through the app's own backend, which removes
+ *    the Liferay UserNotificationEvent only for the token user:
+ *      POST {base}/o/mobile-auth/notifications/delete   { ids: [...] }
  *    For these notifications Liferay returns `message: ""` (no notification
  *    handler renders them), so the text has to come from:
  *
@@ -71,6 +82,109 @@ interface LiferayPage<T> {
   totalCount?: number;
   page?: number;
   pageSize?: number;
+  lastPage?: number;
+  /** Sent by /o/mobile-auth/notifications only. */
+  unreadCount?: number;
+}
+
+/** One page of the notification list (infinite scroll). */
+export interface NotificationPage {
+  items: LiferayNotification[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  /** More pages exist on the server. */
+  hasMore: boolean;
+  /** Unread notifications on the server (backend list only; undefined with the headless fallback). */
+  unreadCount?: number;
+}
+
+/** Page size of the notification screen's infinite scroll. */
+export const NOTIFICATION_PAGE_SIZE = 50;
+
+/** Backend limit of POST /o/mobile-auth/notifications/delete. */
+const DELETE_BATCH_SIZE = 500;
+
+const MOBILE_NOTIFICATIONS_PATH = '/o/mobile-auth/notifications';
+/** Bell badge: newest items needed to spot new ones (the unread count comes from the server). */
+const BADGE_PAGE_SIZE = 20;
+/** Backend list missing (404 = module not deployed yet): use headless, try the backend again after this. */
+const MOBILE_LIST_RETRY_MS = 5 * 60_000;
+let mobileListMissingAt = 0;
+
+type ListPage = LiferayPage<LiferayNotification>;
+
+/** GET /o/mobile-auth/notifications. Returns null when the endpoint is not deployed (404). Throws on other failures. */
+async function fetchMobilePage(
+  accessToken: string,
+  refreshToken: string,
+  onTokenRefresh: TokenRefreshHandler | undefined,
+  page: number,
+  pageSize: number,
+  onSessionExpired?: () => void,
+): Promise<ListPage | null> {
+  if (mobileListMissingAt && Date.now() - mobileListMissingAt < MOBILE_LIST_RETRY_MS) return null;
+
+  const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+  const url = `${getBaseUrl()}${MOBILE_NOTIFICATIONS_PATH}?${query.toString()}`;
+  const { response } = await requestWithTokenRefresh(
+    url,
+    accessToken,
+    refreshToken,
+    { method: 'GET', headers: { Accept: 'application/json' } },
+    onTokenRefresh,
+    onSessionExpired,
+  );
+  if (response.status === 404) {
+    mobileListMissingAt = Date.now();
+    console.warn('[notificationService] /o/mobile-auth/notifications not deployed - using the headless list');
+    return null;
+  }
+  await throwIfNotOk(response, 'Load notifications');
+  mobileListMissingAt = 0;
+  return (await response.json()) as ListPage;
+}
+
+/** GET headless my-user-notifications (fallback). Throws on failure. */
+async function fetchHeadlessPage(
+  accessToken: string,
+  refreshToken: string,
+  onTokenRefresh: TokenRefreshHandler | undefined,
+  page: number,
+  pageSize: number,
+  onSessionExpired?: () => void,
+): Promise<ListPage> {
+  const query = new URLSearchParams({
+    page: String(page),
+    pageSize: String(pageSize),
+    sort: 'dateCreated:desc',
+  });
+  const url = `${getBaseUrl()}${NOTIFICATIONS_PATH}/my-user-notifications?${query.toString()}`;
+  const { response } = await requestWithTokenRefresh(
+    url,
+    accessToken,
+    refreshToken,
+    { method: 'GET', headers: { Accept: 'application/json' } },
+    onTokenRefresh,
+    onSessionExpired,
+  );
+  await throwIfNotOk(response, 'Load notifications');
+  return (await response.json()) as ListPage;
+}
+
+/** Backend list first, headless list when the backend endpoint is not deployed. */
+async function fetchListPage(
+  accessToken: string,
+  refreshToken: string,
+  onTokenRefresh: TokenRefreshHandler | undefined,
+  page: number,
+  pageSize: number,
+  onSessionExpired?: () => void,
+): Promise<ListPage> {
+  return (
+    (await fetchMobilePage(accessToken, refreshToken, onTokenRefresh, page, pageSize, onSessionExpired)) ??
+    (await fetchHeadlessPage(accessToken, refreshToken, onTokenRefresh, page, pageSize, onSessionExpired))
+  );
 }
 
 async function throwIfNotOk(response: Response, what: string): Promise<void> {
@@ -239,10 +353,12 @@ export async function enrichNotifications(
   const enrichStartedAt = Date.now();
 
   await mapLimit(needsText, ENRICH_CONCURRENCY, async (n) => {
-    const event = await fetchUserNotificationEvent(n.id, accessToken, refreshToken, onTokenRefresh);
-    if (!event) return;
+    // The backend list already sends the payload: only the headless list needs the JSONWS lookup.
+    const ownPayload = parseObject(n.payload);
+    const event = ownPayload ? null : await fetchUserNotificationEvent(n.id, accessToken, refreshToken, onTokenRefresh);
+    if (!ownPayload && !event) return;
 
-    let payload = parseObject(event.payload) ?? {};
+    let payload = ownPayload ?? parseObject(event?.payload) ?? {};
 
     // Notification templates: the payload only references the queue entry.
     const queueEntryId =
@@ -256,9 +372,9 @@ export async function enrichNotifications(
 
     enriched.set(n.id, {
       payload,
-      eventType: event.type,
-      // Headless `dateCreated` is authoritative; fall back to the event timestamp.
-      dateCreated: n.dateCreated ?? (event.timestamp ? new Date(event.timestamp).toISOString() : undefined),
+      eventType: n.eventType ?? event?.type,
+      // List `dateCreated` is authoritative; fall back to the event timestamp.
+      dateCreated: n.dateCreated ?? (event?.timestamp ? new Date(event.timestamp).toISOString() : undefined),
     });
   });
 
@@ -296,28 +412,62 @@ export const notificationService = {
     onTokenRefresh?: TokenRefreshHandler,
     options: NotificationOptions = {},
   ): Promise<LiferayNotification[]> {
-    const query = new URLSearchParams({
-      page: '1',
-      pageSize: String(PAGE_SIZE),
-      sort: 'dateCreated:desc',
-    });
-    const url = `${getBaseUrl()}${NOTIFICATIONS_PATH}/my-user-notifications?${query.toString()}`;
-
-    const { response } = await requestWithTokenRefresh(
-      url,
-      accessToken,
-      refreshToken,
-      { method: 'GET', headers: { Accept: 'application/json' } },
-      onTokenRefresh,
-      options.onSessionExpired,
-    );
-    await throwIfNotOk(response, 'Load notifications');
-
-    const data = (await response.json()) as LiferayPage<LiferayNotification>;
+    const data = await fetchListPage(accessToken, refreshToken, onTokenRefresh, 1, PAGE_SIZE, options.onSessionExpired);
     const items = Array.isArray(data.items) ? data.items : [];
 
     if (options.enrich === false) return items;
     return enrichNotifications(items, accessToken, refreshToken, onTokenRefresh);
+  },
+
+  /**
+   * One page of the list, newest first (infinite scroll on the notification screen).
+   * GET /o/mobile-auth/notifications?page=&pageSize=  (headless list if the backend is not deployed)
+   * Throws on network / HTTP failure. Only this page's items are text-enriched.
+   */
+  async getNotificationsPage(
+    accessToken: string,
+    refreshToken: string,
+    onTokenRefresh: TokenRefreshHandler | undefined,
+    page: number,
+    pageSize: number = NOTIFICATION_PAGE_SIZE,
+    options: NotificationOptions = {},
+  ): Promise<NotificationPage> {
+    const data = await fetchListPage(accessToken, refreshToken, onTokenRefresh, page, pageSize, options.onSessionExpired);
+    const raw = Array.isArray(data.items) ? data.items : [];
+    const totalCount = typeof data.totalCount === 'number' ? data.totalCount : raw.length;
+    const hasMore =
+      typeof data.lastPage === 'number'
+        ? page < data.lastPage
+        : typeof data.totalCount === 'number'
+          ? page * pageSize < data.totalCount
+          : raw.length === pageSize;
+
+    const items =
+      options.enrich === false ? raw : await enrichNotifications(raw, accessToken, refreshToken, onTokenRefresh);
+    const unreadCount = typeof data.unreadCount === 'number' ? data.unreadCount : undefined;
+    return { items, page, pageSize, totalCount, hasMore, unreadCount };
+  },
+
+  /**
+   * Bell badge: newest items (to spot new ones) + unread count, without text lookups.
+   * Backend list: 20 items + the server's unread count. Headless fallback: 100 items, counted here.
+   */
+  async getBadgeSnapshot(
+    accessToken: string,
+    refreshToken: string,
+    onTokenRefresh?: TokenRefreshHandler,
+    onSessionExpired?: () => void,
+  ): Promise<{ items: LiferayNotification[]; unreadCount: number }> {
+    const mobile = await fetchMobilePage(accessToken, refreshToken, onTokenRefresh, 1, BADGE_PAGE_SIZE, onSessionExpired);
+    if (mobile) {
+      const items = Array.isArray(mobile.items) ? mobile.items : [];
+      const unreadCount =
+        typeof mobile.unreadCount === 'number' ? mobile.unreadCount : items.filter((n) => !n.read).length;
+      return { items, unreadCount };
+    }
+    const headless = await fetchHeadlessPage(accessToken, refreshToken, onTokenRefresh, 1, PAGE_SIZE, onSessionExpired);
+    const items = Array.isArray(headless.items) ? headless.items : [];
+    return { items, unreadCount: items.filter((n) => !n.read).length };
   },
 
   /** Marks one notification as read. Throws on failure. */
@@ -343,6 +493,48 @@ export const notificationService = {
     await throwIfNotOk(response, 'Mark notification as read');
   },
 
+  /**
+   * Deletes notifications of the logged-in user in one request:
+   *   POST /o/mobile-auth/notifications/delete  { ids: [...] }
+   * Backend deletes the Liferay UserNotificationEvent only when it belongs to the
+   * token user. Returns the ids now gone on the server (deleted + already-gone/skipped
+   * are reported separately). Throws on HTTP failure.
+   */
+  async deleteNotifications(
+    ids: Array<number | string>,
+    accessToken: string,
+    refreshToken: string,
+    onTokenRefresh?: TokenRefreshHandler,
+    onSessionExpired?: () => void,
+  ): Promise<{ deleted: number[]; skipped: number[] }> {
+    const unique = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => id > 0)));
+    const result = { deleted: [] as number[], skipped: [] as number[] };
+    if (unique.length === 0) return result;
+
+    const url = `${getBaseUrl()}/o/mobile-auth/notifications/delete`;
+    for (let i = 0; i < unique.length; i += DELETE_BATCH_SIZE) {
+      const batch = unique.slice(i, i + DELETE_BATCH_SIZE);
+      const { response } = await requestWithTokenRefresh(
+        url,
+        accessToken,
+        refreshToken,
+        {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: batch }),
+        },
+        onTokenRefresh,
+        onSessionExpired,
+      );
+      await throwIfNotOk(response, 'Delete notifications');
+      const data = await response.json().catch(() => null);
+      result.deleted.push(...((data?.deleted as number[]) ?? batch));
+      result.skipped.push(...((data?.skipped as number[]) ?? []));
+    }
+    for (const id of unique) eventCache.delete(String(id));
+    return result;
+  },
+
   /** Number of unread notifications (for the header bell badge). Never throws — returns null on failure. */
   async getUnreadCount(
     accessToken: string,
@@ -351,11 +543,13 @@ export const notificationService = {
     onSessionExpired?: () => void,
   ): Promise<number | null> {
     try {
-      const items = await notificationService.getNotifications(accessToken, refreshToken, onTokenRefresh, {
-        enrich: false,
+      const { unreadCount } = await notificationService.getBadgeSnapshot(
+        accessToken,
+        refreshToken,
+        onTokenRefresh,
         onSessionExpired,
-      });
-      return items.filter((n) => !n.read).length;
+      );
+      return unreadCount;
     } catch (err) {
       console.warn('[notificationService] getUnreadCount failed:', err);
       return null;

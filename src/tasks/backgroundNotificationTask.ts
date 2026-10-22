@@ -22,6 +22,7 @@ import { getValidSession } from '../services/sessionTokenService';
 import { checkForNewNotifications } from '../services/notificationWatcher';
 import { presentSystemNotifications, setAppBadgeCount } from '../services/systemNotifications';
 import { loadBackgroundTaskModule, loadTaskManagerModule } from '../utils/optionalNativeModules';
+import { getAppSettings, isBackgroundNotificationsEnabled } from '../services/appSettings';
 
 export const NOTIFICATION_TASK = 'fuji-notification-check';
 
@@ -39,6 +40,9 @@ const BackgroundTask = loadBackgroundTaskModule();
  * a minute while a journey is active so alerts arrive much faster.
  */
 export async function runBackgroundNotificationCheck(): Promise<void> {
+  // Settings > Background Notifications OFF: no background check, no system notifications.
+  if (!(await isBackgroundNotificationsEnabled())) return;
+
   const saved = await getAuthSession();
   if (!saved) return; // signed out
 
@@ -92,9 +96,18 @@ if (TaskManager && BackgroundTask) {
   }
 }
 
-/** Starts the periodic background check (call after sign-in). Never throws. */
+/**
+ * Starts the periodic background job (call after sign-in and after a Settings change). Never throws.
+ * The job does two things: the notification check (Background Notifications) and the GPS watchdog
+ * (Background GPS Tracking). It stays registered while at least one of them is ON.
+ */
 export async function registerBackgroundNotificationCheck(): Promise<void> {
   if (!TaskManager || !BackgroundTask) return;
+  const settings = await getAppSettings();
+  if (!settings.backgroundNotifications && !settings.backgroundGps) {
+    await unregisterBackgroundNotificationCheck();
+    return;
+  }
   try {
     const status = await BackgroundTask.getStatusAsync();
     if (status !== BackgroundTask.BackgroundTaskStatus.Available) {

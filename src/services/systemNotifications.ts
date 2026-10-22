@@ -13,6 +13,7 @@ import { Platform } from 'react-native';
 import type { LiferayNotification } from './notificationService';
 import { getNotificationText, getNotificationTitle } from '../utils/notificationContent';
 import { loadNotificationsModule } from '../utils/optionalNativeModules';
+import { isBackgroundNotificationsEnabled } from './appSettings';
 
 /**
  * Android notification channel. A channel's importance is FIXED the first time it is created on a
@@ -107,12 +108,16 @@ export async function ensureNotificationPermission(): Promise<boolean> {
   }
 }
 
-/** Raises system notifications for newly arrived Liferay notifications. Never throws. */
+/**
+ * Raises system notifications for newly arrived Liferay notifications (app in the background / closed).
+ * Skipped when Settings > Background Notifications is OFF. Never throws.
+ */
 export async function presentSystemNotifications(newItems: LiferayNotification[]): Promise<void> {
   const Notifications = loadNotificationsModule();
   if (!Notifications || newItems.length === 0) return;
 
   try {
+    if (!(await isBackgroundNotificationsEnabled())) return;
     const permission = await Notifications.getPermissionsAsync();
     if (!permission.granted) return;
     await ensureAndroidChannel();
