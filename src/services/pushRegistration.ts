@@ -15,6 +15,13 @@
  *   4. On logout the field is cleared so the next user of this phone does not get the
  *      previous driver's notifications.
  *
+ *   ONE PHONE = ONE USER: the token is saved through
+ *        POST {LIFERAY}/o/mobile-auth/push-token   { "fcmToken": "<token>" }
+ *   which stores it on the signed-in user ONLY and removes the same token from every
+ *   other user (left behind by a failed logout / user switch / expired session), so the
+ *   phone receives the pushes of the signed-in user and nobody else's.
+ *   The PATCH below is used only when the server does not have that endpoint yet (404).
+ *
  * LOGS - filter the Metro / `adb logcat -s ReactNativeJS` output with  [push]
  *   [push] token ...        FCM token obtained from Google
  *   [push] PATCH ...        what was sent to Liferay and the HTTP status
@@ -52,6 +59,8 @@ let lastOkAt = 0;
 /** Always the CURRENT signed-in user + token, so a retry never reuses an expired access token. */
 let latestAuthGetter: (() => PushAuth | null) | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
+/** Registration already running: callers share it instead of sending parallel requests. */
+let inFlight: Promise<boolean> | null = null;
 
 export interface PushAuth {
   userId: string;
@@ -148,6 +157,50 @@ async function saveOnLiferay(auth: PushAuth, fcmToken: string, style: FieldStyle
   return false;
 }
 
+type ServerResult = 'ok' | 'unsupported' | 'failed';
+
+/**
+ * POST /o/mobile-auth/push-token - saves the token on this user only and removes it
+ * from all other users. An empty token clears it (logout).
+ */
+async function saveOnServer(auth: PushAuth, fcmToken: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<ServerResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${getBaseUrl()}/o/mobile-auth/push-token`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${auth.accessToken}`,
+      },
+      body: JSON.stringify({ fcmToken }),
+      signal: controller.signal,
+    });
+    if (res.status === 404 || res.status === 405) {
+      warn(`push-token endpoint not on this server (HTTP ${res.status}) - using the old PATCH`);
+      return 'unsupported';
+    }
+    const body: any = await res.json().catch(() => null);
+    if (!res.ok || !body?.success) {
+      warn(`push-token refused, HTTP ${res.status}`, body?.error ?? '');
+      return 'failed';
+    }
+    log(
+      fcmToken
+        ? `STORED OK - token ${tail(fcmToken)} is on user ${auth.userId} only` +
+            (body.removedFromOtherUsers ? ` (removed from ${body.removedFromOtherUsers} other user(s))` : '')
+        : `token cleared on user ${auth.userId}`,
+    );
+    return 'ok';
+  } catch (err) {
+    warn('push-token request failed (network?):', err);
+    return 'failed';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── FCM token ────────────────────────────────────────────────────────────────
 
 async function getFcmToken(): Promise<string | null> {
@@ -196,7 +249,11 @@ async function readStyle(): Promise<FieldStyle | null> {
 
 /** Saves this phone's FCM token on the signed-in driver's Liferay account. Returns true on success. */
 export async function registerForPush(auth: PushAuth, attempt = 0): Promise<boolean> {
-  const ok = await registerOnce(auth);
+  if (inFlight) return inFlight;
+  inFlight = registerOnce(auth).finally(() => {
+    inFlight = null;
+  });
+  const ok = await inFlight;
   if (ok) {
     lastOkAt = Date.now();
     return true;
@@ -224,7 +281,14 @@ async function registerOnce(auth: PushAuth): Promise<boolean> {
     const fcmToken = await getFcmToken();
     if (!fcmToken) return false;
 
-    // Try the style that worked last time first, then the other one.
+    const server = await saveOnServer(auth, fcmToken);
+    if (server === 'ok') {
+      await appStorage.setItem(STORED_KEY, JSON.stringify({ fcmToken, userId: auth.userId } satisfies StoredRegistration));
+      return true;
+    }
+    if (server === 'failed') return false;
+
+    // Old server without /push-token: try the style that worked last time first, then the other one.
     const remembered = await readStyle();
     const order: FieldStyle[] = remembered === 'custom' ? ['custom', 'top'] : ['top', 'custom'];
     for (const style of order) {
@@ -259,6 +323,8 @@ export async function unregisterFromPush(auth: PushAuth | null): Promise<void> {
       warn('logout: no access token, cannot clear the token on Liferay');
       return;
     }
+    const server = await saveOnServer(auth, '', LOGOUT_TIMEOUT_MS);
+    if (server !== 'unsupported') return;
     const style = (await readStyle()) ?? 'top';
     log(`logout: clearing token ${tail(stored.fcmToken)} on user ${auth.userId}`);
     const res = await liferayFetch('PATCH', auth.userId, auth.accessToken, buildBody(style, ''), LOGOUT_TIMEOUT_MS);
