@@ -20,7 +20,7 @@ interface SplashScreenProps {
  * `onFinish()` opens the Login page automatically.
  *
  * There is no role picker any more — the role comes from the user's Liferay
- * roles at login (see api/roleApi.ts resolveAppRole).
+ * roles returned by OTP verification (see AppNavigator).
  *
  * Not shown when a saved session is restored: AppNavigator goes straight to
  * the dashboard in that case.

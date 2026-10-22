@@ -1,22 +1,15 @@
 /**
- * API client for the Liferay Headless API (dev server).
+ * API client for the Liferay Headless API.
  *
  * Talks to:
- *   1. POST {BASE_URL}/o/oauth2/token
- *      -> OAuth2 access token / refresh token
+ *   1. POST {BASE_URL}/o/mobile-auth/refresh-token
+ *      -> renews an OTP login session (see refreshViaMobileAuth)
  *
- *   2. GET {BASE_URL}/o/headless-admin-user/v1.0/user-accounts/by-email-address/{email}
- *      -> full user account (incl. roleBriefs)
+ *   2. GET/POST dispatch, GPS and notification APIs using the driver's access token
+ *      -> requestWithTokenRefresh automatically renews the token on HTTP 401
  *
- *   3. GET activity/site APIs using an access token
- *      -> requestWithTokenRefresh automatically refreshes on HTTP 401
- *
- * SECURITY NOTE:
- * client_id/client_secret below are shipped inside the app bundle.
- * This is an accepted tradeoff for the current dev/internal build.
- *
- * Before public production release, move the token exchange behind a
- * backend endpoint so the client_secret is not shipped inside the mobile app.
+ * Login itself (send-otp / verify-otp) lives in services/authService.ts.
+ * No OAuth2 client id / client secret is used or shipped inside the app.
  */
 
 import Constants from 'expo-constants';
@@ -39,12 +32,6 @@ const STATIC_ENV: Record<string, string | undefined> = {
 
   EXPO_PUBLIC_LIFERAY_BASE_URL:
     process.env.EXPO_PUBLIC_LIFERAY_BASE_URL,
-
-  EXPO_PUBLIC_LIFERAY_CLIENT_ID:
-    process.env.EXPO_PUBLIC_LIFERAY_CLIENT_ID,
-
-  EXPO_PUBLIC_LIFERAY_CLIENT_SECRET:
-    process.env.EXPO_PUBLIC_LIFERAY_CLIENT_SECRET,
 };
 
 function readConfig(key: string, fallback: string): string {
@@ -63,16 +50,6 @@ const LIFERAY_BASE_URL = readConfig(
   'EXPO_PUBLIC_LIFERAY_BASE_URL',
   'https://13.233.171.171:8443/',
 ).replace(/\/+$/, '');
-
-const LIFERAY_CLIENT_ID = readConfig(
-  'EXPO_PUBLIC_LIFERAY_CLIENT_ID',
-  'id-30d76773-c037-71fa-6eae-11a6fd1abc5a',
-);
-
-const LIFERAY_CLIENT_SECRET = readConfig(
-  'EXPO_PUBLIC_LIFERAY_CLIENT_SECRET',
-  'secret-ab4a065b-46eb-9eb9-5423-1f5fdf34ef',
-);
 
 /**
  * Refresh endpoint for OTP logins. The refresh_token returned by /o/mobile-auth/verify-otp is NOT a
@@ -284,41 +261,6 @@ export interface LiferayTokenResponse {
 }
 
 /**
- * Exchange username/password for an access token.
- */
-export async function getAccessToken(
-  username: string,
-  password: string,
-): Promise<LiferayTokenResponse> {
-  const params = new URLSearchParams({
-    client_id: LIFERAY_CLIENT_ID,
-    client_secret: LIFERAY_CLIENT_SECRET,
-    grant_type: 'password',
-    username,
-    password,
-  });
-
-  const baseUrl = getBaseUrl();
-
-  const response = await fetchWithTimeout(`${baseUrl}/o/oauth2/token`, {
-        method: 'POST',
-
-        headers: {
-          'Content-Type':
-            'application/x-www-form-urlencoded',
-        },
-
-        body: params.toString(),
-      }, DEFAULT_TIMEOUT_MS);
-
-  if (!response.ok) {
-    await throwForBadResponse(response);
-  }
-
-  return (await response.json()) as LiferayTokenResponse;
-}
-
-/**
  * OTP refresh tokens look like base64("<userId>:<id>:<expiryMs>:<secret>") + "." + signature.
  * Password-login refresh tokens (standard Liferay OAuth2) are opaque strings and never match.
  */
@@ -376,8 +318,10 @@ async function refreshViaMobileAuth(refreshToken: string): Promise<LiferayTokenR
 
 /**
  * Exchange a refresh token for a new access token.
- * OTP sessions use /o/mobile-auth/refresh-token; password sessions use the standard OAuth2
- * endpoint (POST {BASE_URL}/o/oauth2/token, grant_type=refresh_token).
+ *
+ * Only OTP sessions (/o/mobile-auth/refresh-token) can be renewed. A refresh token that is not an
+ * OTP token (for example one saved by the old username/password login, which no longer exists) cannot be
+ * renewed, so the caller ends the session and the driver signs in again with OTP.
  */
 export async function refreshAccessToken(
   refreshToken: string,
@@ -386,54 +330,10 @@ export async function refreshAccessToken(
     console.log(`[auth] refresh: OTP session -> POST ${MOBILE_REFRESH_PATH}`);
     return refreshViaMobileAuth(refreshToken);
   }
-  console.log('[auth] refresh: password session -> POST /o/oauth2/token');
-  return refreshViaOAuth(refreshToken);
-}
-
-/** Standard Liferay OAuth2 refresh (password-login sessions). */
-async function refreshViaOAuth(
-  refreshToken: string,
-): Promise<LiferayTokenResponse> {
-  if (!refreshToken) {
-    throw new Error(
-      'Refresh token is missing',
-    );
-  }
-
-  const params = new URLSearchParams({
-    client_id: LIFERAY_CLIENT_ID,
-    client_secret: LIFERAY_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-  });
-
-  const baseUrl = getBaseUrl();
-
-  const response = await fetchWithTimeout(`${baseUrl}/o/oauth2/token`, {
-        method: 'POST',
-
-        headers: {
-          'Content-Type':
-            'application/x-www-form-urlencoded',
-        },
-
-        body: params.toString(),
-      }, DEFAULT_TIMEOUT_MS);
-
-  if (!response.ok) {
-    await throwForBadResponse(response);
-  }
-
-  const data =
-    (await response.json()) as LiferayTokenResponse;
-
-  if (!data.access_token) {
-    throw new Error(
-      'Refresh response did not contain an access token',
-    );
-  }
-
-  return data;
+  console.log('[auth] refresh: not an OTP refresh token -> sign-in required');
+  throw new SessionExpiredError(
+    'This session cannot be renewed. Please sign in again with your mobile number.',
+  );
 }
 
 /**
@@ -787,87 +687,9 @@ export async function requestWithTokenRefresh(
 }
 
 /**
- * Raw shape of the fields we actually use from
- * a Liferay user account.
- */
-export interface LiferayUserAccount {
-  id: number;
-
-  emailAddress: string;
-
-  givenName: string;
-
-  familyName: string;
-
-  name: string;
-
-  alternateName?: string;
-
-  jobTitle?: string;
-
-  externalReferenceCode?: string;
-
-  dateCreated?: string;
-
-  lastLoginDate?: string;
-
-  status?: string;
-
-  image?: string;
-
-  roleBriefs: Array<{
-    id?: number;
-    key: string;
-    name: string;
-    externalReferenceCode?: string;
-  }>;
-}
-
-/**
- * Fetch a user account by email using a bearer token.
- */
-export async function getUserAccountByEmail(
-  accessToken: string,
-  email: string,
-): Promise<LiferayUserAccount> {
-  const baseUrl = getBaseUrl();
-
-  const response = await fetchWithTimeout(`${baseUrl}/o/headless-admin-user/v1.0/user-accounts/by-email-address/${encodeURIComponent(
-        email,
-      )}`, {
-        method: 'GET',
-
-        headers: {
-          Authorization:
-            `Bearer ${accessToken}`,
-        },
-      }, DEFAULT_TIMEOUT_MS);
-
-  if (!response.ok) {
-    if (response.status === 403) {
-      const error = new Error(
-        `Request failed with status 403 (Forbidden): Missing OAuth2 scope in Liferay. Ensure 'Liferay.Headless.Admin.User' scopes are assigned to OAuth2 client '${LIFERAY_CLIENT_ID}' under Liferay Control Panel -> Security -> OAuth2 Administration.`,
-      );
-
-      (error as any).status = 403;
-
-      throw error;
-    }
-
-    await throwForBadResponse(
-      response,
-    );
-  }
-
-  return (await response.json()) as LiferayUserAccount;
-}
-
-/**
  * Exported API client.
  */
 export const apiClient = {
-  getAccessToken,
-
   refreshAccessToken,
 
   renewSessionToken,
@@ -877,8 +699,6 @@ export const apiClient = {
   computeExpiresAt,
 
   getLastAuthFailure,
-
-  getUserAccountByEmail,
 
   isConfigured: (): boolean =>
     Boolean(LIFERAY_BASE_URL),

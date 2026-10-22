@@ -287,7 +287,7 @@ export const tripService = {
             targetDispatch ??
             items.find((d) => d.statusDispatch === DISPATCH_STATUS.IN_TRANSIT) ??
             items.find((d) => d.statusDispatch === DISPATCH_STATUS.DISPATCHED) ??
-            items[0];
+            null;
         }
       } catch (err) {
         console.warn('[TRIP] dispatch list fallback failed:', err instanceof Error ? err.message : err);

@@ -17,6 +17,7 @@ interface WatermarkPreviewScreenProps {
   activityName?: string;
   siteCode?: string;
   siteName?: string;
+  engineerName?: string;
   capturedPhotos: CapturedPhoto[];
   progressNotes: string;
   onBack: () => void;
@@ -25,10 +26,11 @@ interface WatermarkPreviewScreenProps {
 }
 
 export default function WatermarkPreviewScreen({
-  activityCode = 'ACT-04',
-  activityName = 'Precast Wall Panels Erection',
-  siteCode = 'AW-NGP-014',
-  siteName = 'Digdoh Model Center',
+  activityCode = '',
+  activityName = '',
+  siteCode = '',
+  siteName = '',
+  engineerName = '',
   capturedPhotos,
   progressNotes,
   onBack,
@@ -50,7 +52,7 @@ export default function WatermarkPreviewScreen({
         >
           {/* Header with Curve Background */}
           <AppHeader
-            notificationCount={3}
+            notificationCount={0}
             onNotificationPress={() => console.log('[WatermarkPreview] Notifications pressed')}
             avatarIconColor="#0056A6"
             avatarBackgroundColor="#EBF3FA"
@@ -107,19 +109,21 @@ export default function WatermarkPreviewScreen({
                 <View style={styles.watermarkRow}>
                   <Ionicons name="location-outline" size={12} color="#94A3B8" />
                   <Text style={styles.watermarkText}>
-                    Site: {siteCode} • {siteName}
+                    Site: {[siteCode, siteName].filter(Boolean).join(' • ') || '—'}
                   </Text>
                 </View>
-                <View style={styles.watermarkRow}>
-                  <Ionicons name="person-outline" size={12} color="#94A3B8" />
-                  <Text style={styles.watermarkText}>
-                    Engineer: R. Sharma [SITE ENGINEER • EMP-FS-8492]
-                  </Text>
-                </View>
+                {engineerName ? (
+                  <View style={styles.watermarkRow}>
+                    <Ionicons name="person-outline" size={12} color="#94A3B8" />
+                    <Text style={styles.watermarkText}>
+                      Engineer: {engineerName}
+                    </Text>
+                  </View>
+                ) : null}
                 <View style={styles.watermarkRow}>
                   <Ionicons name="time-outline" size={12} color="#94A3B8" />
                   <Text style={styles.watermarkText}>
-                    {currentPhoto?.timestamp || '06-Mar-2026 16:30:22 IST'} • {activityCode} {activityName}
+                    {[currentPhoto?.timestamp, [activityCode, activityName].filter(Boolean).join(' ')].filter(Boolean).join(' • ')}
                   </Text>
                 </View>
                 <View style={styles.watermarkRow}>

@@ -597,7 +597,7 @@ export default function ActivityScreen({
           showsVerticalScrollIndicator={true}
         >
           <AppHeader
-            notificationCount={3}
+            notificationCount={0}
             onNotificationPress={
               handleNotificationsPress
             }
@@ -1115,7 +1115,7 @@ export default function ActivityScreen({
 
         <BottomTabBar
           activeTab={activeTab}
-          notificationCount={3}
+          notificationCount={0}
           onTabPress={handleTabPress}
         />
       </View>

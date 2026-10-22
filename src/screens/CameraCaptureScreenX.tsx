@@ -31,12 +31,12 @@ export interface CameraCaptureScreenProps {
 }
 
 export default function CameraCaptureScreen({
-  siteCode = 'AW-NGP-014',
-  siteName = 'Digdoh Model Center',
-  engineerName = 'R. Sharma',
-  engineerId = 'EMP-FS-8492',
-  activityLabel = 'ACT-04 Wall Panels',
-  frameHintText = 'Align precast wall panels in frame',
+  siteCode = '',
+  siteName = '',
+  engineerName = '',
+  engineerId = '',
+  activityLabel = '',
+  frameHintText = 'Align the subject in the frame',
   onCancel,
   onPhotoCaptured,
 }: CameraCaptureScreenProps) {
@@ -139,7 +139,7 @@ export default function CameraCaptureScreen({
         coords: coordsText,
         timestamp,
         stage: activityLabel,
-        title: `${siteCode} EVIDENCE`,
+        title: `${siteCode ? `${siteCode} ` : ''}EVIDENCE`,
         base64,
         latitude,
         longitude,
@@ -207,22 +207,26 @@ export default function CameraCaptureScreen({
             </View>
           </View>
 
-          <View style={styles.auditRow}>
-            <Ionicons name="location-outline" size={13} color="#94A3B8" />
-            <Text style={styles.auditRowText}>
-              Site: {siteCode} ({siteName})
-            </Text>
-          </View>
+          {siteCode || siteName ? (
+            <View style={styles.auditRow}>
+              <Ionicons name="location-outline" size={13} color="#94A3B8" />
+              <Text style={styles.auditRowText}>
+                Site: {[siteCode, siteName ? `(${siteName})` : ''].filter(Boolean).join(' ')}
+              </Text>
+            </View>
+          ) : null}
           <View style={styles.auditRow}>
             <Ionicons name="disc-outline" size={13} color="#94A3B8" />
             <Text style={styles.auditRowText}>{coordsText}</Text>
           </View>
-          <View style={styles.auditRow}>
-            <Ionicons name="person-outline" size={13} color="#94A3B8" />
-            <Text style={styles.auditRowText}>
-              Engineer: {engineerName} ({engineerId})
-            </Text>
-          </View>
+          {engineerName ? (
+            <View style={styles.auditRow}>
+              <Ionicons name="person-outline" size={13} color="#94A3B8" />
+              <Text style={styles.auditRowText}>
+                Engineer: {engineerName}{engineerId ? ` (${engineerId})` : ''}
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.shutterWrap}>

@@ -7,20 +7,6 @@ import { BottomTabBar, BottomTabKey } from '../components/BottomTabBar';
 import type { UserProfile } from '../types/auth';
 import { colors, radius, spacing, typography } from '../theme';
 
-const ENGINEER_PROFILE = {
-  empId: 'EMP-FS-8492',
-  name: 'R. Sharma (Site Engineer)',
-  roleLine: 'SITE ENGINEER / SUPERVISOR',
-  email: 'r.sharma@fujisilvertech.com',
-  phone: '+91 98230 45812',
-  jurisdiction: {
-    masterProduct: 'Maharashtra Anganwadi Precast',
-    jurisdiction: 'Nagpur District (Cluster 02 - Digdoh)',
-    assignedSites: '8 Active Precast Anganwadis',
-    reportingManager: 'S. Deshmukh (Cluster Head)',
-  },
-};
-
 interface OperationalAction {
   key: string;
   label: string;
@@ -98,12 +84,11 @@ export const EngineerProfileScreen: React.FC<EngineerProfileScreenProps> = ({
     console.log(`[EngineerProfileScreen] Operational action "${key}" pressed — not yet implemented.`);
   }, []);
 
-  const displayName = user.fullName || ENGINEER_PROFILE.name;
-  const empIdText = user.id ? `ID: ${user.id}` : ENGINEER_PROFILE.empId;
-  const roleLineText = `${user.jobTitle || 'SITE ENGINEER'} • ${empIdText}`;
-  const contactLineText = `${user.email || ENGINEER_PROFILE.email}${
-    user.alternateName ? ` • @${user.alternateName}` : ''
-  }`;
+  const displayName = user.fullName || user.alternateName || '';
+  const roleLineText = `${user.jobTitle || 'SITE ENGINEER'} • ID: ${user.id}`;
+  const contactLineText = [user.email, user.alternateName ? `@${user.alternateName}` : '']
+    .filter(Boolean)
+    .join(' • ');
 
   return (
     <View style={styles.root}>
@@ -113,7 +98,7 @@ export const EngineerProfileScreen: React.FC<EngineerProfileScreenProps> = ({
         showsVerticalScrollIndicator={false}
       >
         <AppHeader
-          notificationCount={3}
+          notificationCount={0}
           onNotificationPress={() => console.log('[EngineerProfileScreen] Notifications pressed.')}
           onAvatarPress={() => {}}
         />
@@ -125,7 +110,7 @@ export const EngineerProfileScreen: React.FC<EngineerProfileScreenProps> = ({
           </Pressable>
 
           <Text style={styles.title}>Field Engineer Profile</Text>
-          <Text style={styles.titleSubtext}>Account identity, assigned jurisdiction & device status</Text>
+          <Text style={styles.titleSubtext}>Account identity & device status</Text>
 
           <View style={[styles.card, styles.identityCard]}>
             <View style={styles.avatar}>
@@ -142,18 +127,6 @@ export const EngineerProfileScreen: React.FC<EngineerProfileScreenProps> = ({
             <InfoRow label="Username" value={user.alternateName || 'N/A'} />
             <InfoRow label="Account Status" value={user.status || 'Active'} />
             <InfoRow label="External Ref Code" value={user.externalReferenceCode || 'N/A'} last />
-          </View>
-
-          <View style={[styles.card, styles.infoCard]}>
-            <Text style={styles.cardHeading}>Assigned Product & Jurisdiction</Text>
-            <InfoRow label="Master Product" value={ENGINEER_PROFILE.jurisdiction.masterProduct} />
-            <InfoRow label="Jurisdiction" value={ENGINEER_PROFILE.jurisdiction.jurisdiction} />
-            <InfoRow label="Assigned Sites" value={ENGINEER_PROFILE.jurisdiction.assignedSites} />
-            <InfoRow
-              label="Reporting Manager"
-              value={ENGINEER_PROFILE.jurisdiction.reportingManager}
-              last
-            />
           </View>
 
           <View style={[styles.card, styles.actionsCard]}>

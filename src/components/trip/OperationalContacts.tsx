@@ -11,8 +11,8 @@ interface OperationalContactsProps {
 /**
  * Operational Contacts Card matching Section 6 & design reference:
  * - Card title: "Operational Contacts"
- * - Site Engineer (Rajesh Sharma) with green circular call button
- * - Plant Dispatch (Vikas Patil) with light blue circular call button
+ * - Site Engineer contact with green circular call button
+ * - Plant Dispatch contact with light blue circular call button
  */
 export const OperationalContacts: React.FC<OperationalContactsProps> = ({
   contacts,

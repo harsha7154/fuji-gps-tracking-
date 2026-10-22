@@ -77,7 +77,6 @@ export interface SubmitPodParams {
   driverName?: string;
   siteCode?: string;
   siteName?: string;
-  receiverName?: string;
   signed?: boolean;
 }
 
@@ -279,18 +278,18 @@ export function resolveCapturedAt(photo: CapturedPhoto): number {
 }
 
 function parseCargoWeight(qty: string | undefined): number {
-  if (!qty) return 18.4;
+  if (!qty) return 0;
   const match = qty.match(/(\d+(?:\.\d+)?)/);
   if (match) {
     const val = parseFloat(match[1]);
     if (Number.isFinite(val)) return val;
   }
-  return 18.4;
+  return 0;
 }
 
 /**
  * Ensures that objectEntryId sent to the backend is strictly the genuine
- * Liferay Object entry ID (e.g. 189236, 187770) and NEVER a dispatch ID (e.g. "DSP-400002", "746588").
+ * Liferay Object entry ID (e.g. 189236, 187770) and NEVER a dispatch ID (e.g. "DSP-400002").
  */
 export async function resolveGenuineObjectEntryId(
   candidate: unknown,
@@ -304,8 +303,7 @@ export async function resolveGenuineObjectEntryId(
     !candidateStr ||
     candidateStr.toUpperCase().startsWith('DSP-') ||
     candidateStr.includes('#') ||
-    !isPureNumber ||
-    candidateStr === '746588'; // known business code that causes 404 in Liferay object endpoints
+    !isPureNumber;
 
   if (isPureNumber && !isDispatchCode && candidateStr.length > 0) {
     return candidateStr;
@@ -709,10 +707,11 @@ export const driverPodService = {
       }
     }
 
-    const resolvedFileId = lastResponse?.podFileEntryId || uploadedFileIds[0] || 'CONFIRMED';
-    const referenceId = `POD-${lastResponse?.objectEntryId || objectEntryId}-${resolvedFileId}`;
-    const dispatchCode = lastResponse?.dispatchId || params.tripId || 'DSP-CONFIRMED';
-    const ewbNumber = `EWB-${dispatchCode.replace(/^#/, '')}`;
+    const resolvedFileId = String(lastResponse?.podFileEntryId || uploadedFileIds[0] || '');
+    const referenceId = resolvedFileId
+      ? `POD-${lastResponse?.objectEntryId || objectEntryId}-${resolvedFileId}`
+      : `POD-${lastResponse?.objectEntryId || objectEntryId}`;
+    const dispatchCode = String(lastResponse?.dispatchId || params.tripId || objectEntryId);
 
     // Mark persistently in local storage only after confirmed upload
     await savePodSubmittedLocalRecord({
@@ -725,8 +724,6 @@ export const driverPodService = {
     return {
       success: true,
       referenceId,
-      eWayBillNumber: ewbNumber,
-      ewbNumber,
       photosCount: photos.length,
       evidenceCount: photos.length,
       objectEntryId: String(lastResponse?.objectEntryId || objectEntryId),
@@ -734,10 +731,6 @@ export const driverPodService = {
       podFileEntryIds: uploadedFileIds,
       message: lastResponse?.message || 'Proof of delivery photo saved.',
       dispatchId: dispatchCode,
-      destinationSite: `${params.siteCode || 'SITE'} (${params.siteName || ''})`,
-      receiverSignOff: params.receiverName ? `${params.receiverName} (Site Engineer)` : 'Verified Digitally',
-      cargoInspected: 'Precast Cargo Verified',
-      vehicleAndDriver: `${params.vehicleNumber || '—'} • ${params.driverName || 'Driver'}`,
     };
   },
 
@@ -857,7 +850,6 @@ export const driverPodService = {
         candidateId !== undefined &&
         (String(candidateId).toUpperCase().startsWith('DSP-') ||
          String(candidateId) === String(dispatch.dispatchID) ||
-         String(candidateId) === '746588' ||
          !/^\d+$/.test(String(candidateId)));
 
       const realObjectEntryId =
@@ -875,45 +867,23 @@ export const driverPodService = {
       });
       const siteCode = dispatch.destinationSiteAWC || dispatch.siteName || 'SITE';
       const siteName = dispatch.siteName || dispatch.destinationSiteAWC || 'Site';
-      const cargoSummary = dispatch.productName || dispatch.elementMaterial || 'Precast Panels';
+      const cargoSummary = dispatch.productName || dispatch.elementMaterial || '';
       const cargoWeight = parseCargoWeight(dispatch.quantity);
 
       return {
-        tripId: dispatch.dispatchID || 'DSP-000000',
+        tripId: dispatch.dispatchID || '',
         objectEntryId: realObjectEntryId,
         siteCode,
         siteName,
-        receiver: {
-          name: 'Rajesh Sharma',
-          role: 'Site Engineer',
-          empId: 'EMP-FS-8492',
-        },
         cargoSummary,
         cargoWeightTons: cargoWeight,
         vehicleNumber: dispatch.vehicleNumber || '—',
         driverName: dispatch.driverName || session?.user?.fullName || 'Driver',
         checklist: DEFAULT_CARGO_CHECKLIST,
-        eWayBillNumber: `EWB-${dispatch.dispatchID || 'VERIFIED'}`,
       };
     }
 
-    // Fallback: If no dispatch could be resolved from server, return template with undefined objectEntryId
-    return {
-      tripId: params?.dispatchId || '#TRIP-FS-2026-941',
-      objectEntryId: undefined,
-      siteCode: 'AW-NGP-014',
-      siteName: 'Digdoh Anganwadi',
-      cargoSummary: '6x Precast Panels',
-      cargoWeightTons: 18.4,
-      receiver: {
-        name: 'Rajesh Sharma',
-        role: 'Site Engineer',
-        empId: 'EMP-FS-8492',
-      },
-      vehicleNumber: 'MH-31-CB-9021',
-      driverName: session?.user?.fullName || 'Driver',
-      checklist: DEFAULT_CARGO_CHECKLIST,
-      eWayBillNumber: 'EWB-291840294120',
-    };
+    // No dispatch could be resolved from the server: there is nothing real to show or submit against.
+    throw new Error('No dispatch was found for this driver, so the proof of delivery cannot be prepared.');
   },
 };

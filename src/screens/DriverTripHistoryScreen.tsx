@@ -259,7 +259,6 @@ export const DriverTripHistoryScreen: React.FC<DriverTripHistoryScreenProps> = (
     [onDownloadReceiptPdf]
   );
 
-  const vehiclePlate = user?.vehicleNumber || 'MH-31-CB-8842';
   const avatarInitials = extractInitials(user?.fullName);
 
   return (

@@ -2405,7 +2405,6 @@ export const AppNavigator: React.FC = () => {
           summary?.objectEntryId !== undefined &&
           (String(summary.objectEntryId).toUpperCase().startsWith('DSP-') ||
            String(summary.objectEntryId) === String(summary.tripId) ||
-           String(summary.objectEntryId) === '746588' ||
            !/^\d+$/.test(String(summary.objectEntryId)));
 
         const validSelectedEntryId =
@@ -2473,7 +2472,6 @@ export const AppNavigator: React.FC = () => {
           driverName: summary?.driverName,
           siteCode: summary?.siteCode,
           siteName: summary?.siteName,
-          receiverName: summary?.receiver?.name,
         });
 
         setDriverPodSubmission(submission);
@@ -3141,8 +3139,8 @@ export const AppNavigator: React.FC = () => {
       case 'DriverCamera':
         return (
           <CameraCaptureScreen
-            siteCode={driverPodTripSummary?.siteCode || 'AW-NGP-014'}
-            siteName={driverPodTripSummary?.siteName || 'Digdoh Anganwadi'}
+            siteCode={driverPodTripSummary?.siteCode}
+            siteName={driverPodTripSummary?.siteName}
             activityLabel="Proof of Delivery • Cargo Evidence"
             onCancel={() => setRoute('DriverPod')}
             onPhotoCaptured={handleDriverPhotoCaptured}
@@ -3931,9 +3929,11 @@ export const AppNavigator: React.FC = () => {
 
               }
 
-              siteCode="AW-NGP-014"
+              siteCode={selectedSite?.code}
 
-              siteName="Digdoh Model Center"
+              siteName={selectedSite?.name}
+
+              engineerName={currentUser?.fullName}
 
               capturedPhotos={
 
@@ -4099,9 +4099,9 @@ export const AppNavigator: React.FC = () => {
 
               }
 
-              siteCode="AW-NGP-014"
+              siteCode={selectedSite?.code}
 
-              siteName="Digdoh Anganwadi"
+              siteName={selectedSite?.name}
 
               capturedPhotos={
 
@@ -4257,9 +4257,11 @@ export const AppNavigator: React.FC = () => {
 
             <CameraCaptureScreen
 
-              siteCode="AW-NGP-014"
+              siteCode={selectedSite?.code}
 
-              siteName="Digdoh Model Center"
+              siteName={selectedSite?.name}
+
+              engineerName={currentUser?.fullName}
 
               activityLabel={`${selectedActivity.code} ${selectedActivity.name}`}
 

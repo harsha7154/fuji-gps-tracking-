@@ -111,18 +111,18 @@ export interface DailyProgressScreenProps {
 }
 
 export default function DailyProgressScreen({
-  activityCode = 'ACT-04',
-  activityName = 'Precast Wall Panels Erection',
-  activityStatus = 'IN PROGRESS',
-  siteCode = 'AW-NGP-014',
-  siteName = 'Digdoh Anganwadi',
-  shiftLogDate = '06-Mar-2026',
-  totalTargetQty = 20,
-  unitLabel = 'Wall Panels',
-  loggedBeforeQty = 12,
-  loggedBeforePct = 60,
-  scheduleLabel = '06 Mar – 20 Mar',
-  stageLabel = 'Stage 2 Superstructure',
+  activityCode = '',
+  activityName = '',
+  activityStatus = '',
+  siteCode = '',
+  siteName = '',
+  shiftLogDate = new Date().toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }),
+  totalTargetQty,
+  unitLabel = '',
+  loggedBeforeQty,
+  loggedBeforePct,
+  scheduleLabel = '—',
+  stageLabel = '—',
   capturedPhotos,
   onTakePhoto,
   onDeletePhoto,
@@ -184,7 +184,7 @@ export default function DailyProgressScreen({
           showsVerticalScrollIndicator={true}
         >
           <AppHeader
-            notificationCount={3}
+            notificationCount={0}
             onNotificationPress={() => console.log('[DailyProgressScreen] Notifications pressed')}
             avatarIconColor="#0056A6"
             avatarBackgroundColor="#EBF3FA"
@@ -203,7 +203,7 @@ export default function DailyProgressScreen({
               <Text style={styles.activityCodeBadge}>{activityCode}</Text>
               <Text style={styles.statusBadge}>{activityStatus}</Text>
               <Text style={styles.activityInline}>
-                {siteCode} • {activityName}
+                {[siteCode, activityName].filter(Boolean).join(' • ')}
               </Text>
             </View>
           </View>
@@ -220,18 +220,18 @@ export default function DailyProgressScreen({
               </View>
               <View style={styles.specItem}>
                 <Text style={styles.specLabel}>Unit of Work: </Text>
-                <Text style={styles.specValue}>{unitLabel} (RCC)</Text>
+                <Text style={styles.specValue}>{unitLabel || '—'}</Text>
               </View>
               <View style={styles.specItem}>
                 <Text style={styles.specLabel}>Total Target: </Text>
                 <Text style={styles.specValue}>
-                  {totalTargetQty} {unitLabel}
+                  {totalTargetQty != null ? `${totalTargetQty} ${unitLabel}`.trim() : '—'}
                 </Text>
               </View>
               <View style={styles.specItem}>
                 <Text style={styles.specLabel}>Logged Before: </Text>
                 <Text style={[styles.specValue, { color: colors.primary }]}>
-                  {loggedBeforeQty} {unitLabel} ({loggedBeforePct}%)
+                  {loggedBeforeQty != null ? `${loggedBeforeQty} ${unitLabel} (${loggedBeforePct ?? 0}%)`.replace('  ', ' ') : '—'}
                 </Text>
               </View>
             </View>
@@ -270,7 +270,7 @@ export default function DailyProgressScreen({
                 <View style={styles.primaryPreviewFooter}>
                   <View style={styles.primaryPreviewFooterRow}>
                     <Text style={styles.primaryPreviewSite}>
-                      {siteCode} • {siteName}
+                      {[siteCode, siteName].filter(Boolean).join(' • ')}
                     </Text>
                     <Text style={styles.primaryPreviewGpsOk}>✓ GPS LOCKED</Text>
                   </View>
@@ -432,7 +432,7 @@ export default function DailyProgressScreen({
           </View>
         </View>
 
-        <BottomTabBar activeTab={activeTab} notificationCount={3} onTabPress={handleTabPress} />
+        <BottomTabBar activeTab={activeTab} notificationCount={0} onTabPress={handleTabPress} />
 
         {previewPhoto && previewIndex !== null && (
           <View style={styles.previewOverlay}>
@@ -457,7 +457,7 @@ export default function DailyProgressScreen({
               <Image source={{ uri: previewPhoto.uri }} style={styles.previewImage} resizeMode="cover" />
               <View style={styles.previewWatermark}>
                 <View style={styles.previewWatermarkRow}>
-                  <Text style={styles.previewWatermarkTitle}>{previewPhoto.title || `${siteCode} EVIDENCE`}</Text>
+                  <Text style={styles.previewWatermarkTitle}>{previewPhoto.title || `${siteCode ? `${siteCode} ` : ''}EVIDENCE`}</Text>
                   <Text style={styles.previewWatermarkVerified}>✓ GEO-VERIFIED</Text>
                 </View>
                 <View style={styles.previewWatermarkRow}>

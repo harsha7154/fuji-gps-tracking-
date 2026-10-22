@@ -76,7 +76,7 @@ export interface PodTripSummary {
   tripId: string;
   siteCode: string;
   siteName: string;
-  receiver: PodReceiver;
+  receiver?: PodReceiver;
   cargoSummary: string;
   cargoWeightTons: number;
   vehicleNumber: string;
@@ -111,7 +111,7 @@ export interface SubmitProofOfDeliveryParams {
 
 export interface PodSubmissionResult {
   referenceId: string;
-  eWayBillNumber: string;
+  eWayBillNumber?: string;
   photosCount: number;
   objectEntryId?: string;
   podFileEntryId?: string;
@@ -123,12 +123,7 @@ export interface PodSubmissionResult {
 
 export interface DriverPodSubmissionResult {
   referenceId: string;
-  ewbNumber: string;
-  destinationSite: string;
-  receiverSignOff: string;
-  cargoInspected: string;
   evidenceCount: number;
-  vehicleAndDriver: string;
   objectEntryId?: string;
   podFileEntryId?: string;
   podFileEntryIds?: string[];

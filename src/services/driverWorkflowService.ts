@@ -142,10 +142,6 @@ export const driverWorkflowService = {
         accessToken: params.accessToken,
       });
     }
-    return {
-      referenceId: 'SUBMITTED',
-      eWayBillNumber: 'N/A',
-      photosCount: params.photosCount,
-    };
+    throw new Error('Proof of delivery needs a dispatch and at least one photo.');
   },
 };

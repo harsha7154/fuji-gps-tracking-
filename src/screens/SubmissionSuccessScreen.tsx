@@ -23,10 +23,10 @@ interface SubmissionSuccessScreenProps {
 }
 
 export default function SubmissionSuccessScreen({
-  activityCode = 'ACT-04',
-  activityName = 'Precast Wall Panels Erection',
-  siteCode = 'AW-NGP-014',
-  siteName = 'Digdoh Anganwadi',
+  activityCode = '',
+  activityName = '',
+  siteCode = '',
+  siteName = '',
   capturedPhotos,
   progressNotes,
   onLogAnother,
@@ -45,7 +45,7 @@ export default function SubmissionSuccessScreen({
         >
           {/* Header with Curve Background */}
           <AppHeader
-            notificationCount={3}
+            notificationCount={0}
             onNotificationPress={() => console.log('[SubmissionSuccess] Notifications pressed')}
             avatarIconColor="#0056A6"
             avatarBackgroundColor="#EBF3FA"
@@ -80,7 +80,7 @@ export default function SubmissionSuccessScreen({
             <View style={styles.detailsCard}>
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Site:</Text>
-                <Text style={styles.detailValue}>{siteCode} ({siteName})</Text>
+                <Text style={styles.detailValue}>{[siteCode, siteName ? `(${siteName})` : ''].filter(Boolean).join(' ') || '—'}</Text>
               </View>
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Activity:</Text>
