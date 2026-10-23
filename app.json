@@ -33,7 +33,7 @@
       "softwareKeyboardLayoutMode": "resize",
       "config": {
         "googleMaps": {
-          "apiKey": "AIzaSyAp2z5Sf3rLGFso2aCRxdEfzQMlGxyffx8"
+          "apiKey": "AIzaSyAsfCCsXU0hLH6vzryxgBCawtats_Kco4c"
         }
       },
       "permissions": [
@@ -99,9 +99,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "d2974395-e42e-4fe6-86fb-829a44b77d13"
+        "projectId": "a620aac0-045e-48d0-9dcb-0914e3678325"
       }
     },
-    "owner": "harsha7154"
+    "owner": "manikandan.m"
   }
 }

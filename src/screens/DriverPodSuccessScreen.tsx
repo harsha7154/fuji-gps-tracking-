@@ -78,11 +78,14 @@ export const DriverPodSuccessScreen: React.FC<DriverPodSuccessScreenProps> = ({
         showsVerticalScrollIndicator={false}
       >
         <AppHeader
-          logoWidth={100}
+          variant="curved"
+          logoWidth={130}
           notificationCount={notificationCount ?? 0}
+          notificationBadgeColor="#0B5FA8"
           onNotificationPress={onNavigateToNotifications}
-          avatarIconColor={colors.statOrangeIcon}
-          avatarBackgroundColor={colors.statOrangeBg}
+          avatarIcon="person"
+          avatarIconColor="#D97706"
+          avatarBackgroundColor="#FEF3D6"
           onAvatarPress={onNavigateToProfile}
         />
 

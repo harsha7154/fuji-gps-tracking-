@@ -117,8 +117,14 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         showsVerticalScrollIndicator={false}
       >
         <AppHeader
-          notificationCount={data?.notificationCount ?? 0}
+          variant="curved"
+          logoWidth={130}
+          notificationCount={data?.notificationCount ?? 1}
+          notificationBadgeColor="#0B5FA8"
           onNotificationPress={handleNotificationsPress}
+          avatarIcon="person"
+          avatarIconColor="#D97706"
+          avatarBackgroundColor="#FEF3D6"
           onAvatarPress={handleAvatarPress}
         />
 

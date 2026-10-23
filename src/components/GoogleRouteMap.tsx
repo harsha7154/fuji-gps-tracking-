@@ -10,7 +10,7 @@ import { RoutePhase, useRouteTracker } from '../hooks/useRouteTracker';
 import type { Pt } from '../utils/routeGeometry';
 import { logMapLoad } from '../utils/apiUsageLogger';
 
-// Same truck picture as the web Dispatch Tracker (top view, cab pointing north).
+// Truck image displayed on the map marker (top view, cab pointing north).
 const TRUCK_IMAGE = require('../../assets/images/truck-top.png');
 
 export interface GoogleRouteMapProps {
@@ -55,13 +55,61 @@ const FIT_PADDING = { top: 150, right: 50, bottom: 70, left: 50 };
 
 const toLatLng = (p: Pt) => ({ latitude: p.lat, longitude: p.lng });
 
-/** Top-view truck, turned to the driving direction by the Marker's `rotation`. */
-const TruckMarkerContent: React.FC<{ live: boolean; onReady: () => void }> = ({ live, onReady }) => (
-  <View style={styles.truckWrap}>
-    <View style={[styles.truckHalo, live && styles.truckHaloLive]} />
-    <Image source={TRUCK_IMAGE} style={styles.truckImage} resizeMode="contain" onLoad={onReady} fadeDuration={0} />
-  </View>
-);
+/** Keep re-snapshotting a custom marker view this long at most after it (re)mounts. */
+const TRUCK_SNAPSHOT_FALLBACK_MS = 3000;
+/** Extra time after the image loaded before the snapshot is frozen. */
+const TRUCK_SNAPSHOT_AFTER_LOAD_MS = 600;
+
+/**
+ * Top-view truck at the live GPS position, turned to the driving direction by `rotation`.
+ *
+ * The native map draws a custom marker view as a snapshot. Every map surface (inline and
+ * fullscreen) renders its OWN TruckMarker, so each one keeps tracking view changes until
+ * its image is drawn — including a map opened later (fullscreen) and a truck that appears
+ * only after the first GPS fix. Afterwards tracking stops (battery); position and rotation
+ * still update because they are Marker props, not part of the snapshot.
+ */
+const TruckMarker: React.FC<{
+  coordinate: { latitude: number; longitude: number };
+  heading: number;
+  live: boolean;
+  title: string;
+}> = ({ coordinate, heading, live, title }) => {
+  const [tracksViewChanges, setTracksViewChanges] = useState(true);
+  const [imageLoaded, setImageLoaded] = useState(false);
+
+  // (Re)snapshot on mount and whenever the halo colour changes.
+  useEffect(() => {
+    setTracksViewChanges(true);
+    const timer = setTimeout(() => setTracksViewChanges(false), TRUCK_SNAPSHOT_FALLBACK_MS);
+    return () => clearTimeout(timer);
+  }, [live]);
+
+  useEffect(() => {
+    if (!imageLoaded) return undefined;
+    const timer = setTimeout(() => setTracksViewChanges(false), TRUCK_SNAPSHOT_AFTER_LOAD_MS);
+    return () => clearTimeout(timer);
+  }, [imageLoaded, live]);
+
+  const handleLoad = useCallback(() => setImageLoaded(true), []);
+
+  return (
+    <Marker
+      coordinate={coordinate}
+      anchor={{ x: 0.5, y: 0.5 }}
+      flat
+      rotation={heading}
+      title={title}
+      tracksViewChanges={tracksViewChanges}
+      zIndex={10}
+    >
+      <View style={styles.truckWrap} collapsable={false}>
+        <View style={[styles.truckHalo, live && styles.truckHaloLive]} />
+        <Image source={TRUCK_IMAGE} style={styles.truckImage} resizeMode="contain" onLoad={handleLoad} fadeDuration={0} />
+      </View>
+    </Marker>
+  );
+};
 
 const DotMarkerContent: React.FC<{ color: string }> = ({ color }) => (
   <View style={styles.dotOuter}>
@@ -110,19 +158,6 @@ export const GoogleRouteMap: React.FC<GoogleRouteMapProps> = ({
   const inlineMapRef = useRef<MapView>(null);
   const fullscreenMapRef = useRef<MapView>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
-
-  // Custom marker views are snapshotted by the native map: keep tracking view
-  // changes until the truck image has rendered, then stop (saves battery).
-  const [truckTracksChanges, setTruckTracksChanges] = useState(true);
-  const handleTruckReady = useCallback(() => {
-    setTimeout(() => setTruckTracksChanges(false), 600);
-  }, []);
-  useEffect(() => {
-    // The halo colour changes with `live` — snapshot again.
-    setTruckTracksChanges(true);
-    const timer = setTimeout(() => setTruckTracksChanges(false), 800);
-    return () => clearTimeout(timer);
-  }, [route.live]);
 
   // Follow the truck until the driver drags the map; "recenter" follows again.
   const followRef = useRef(true);
@@ -345,17 +380,12 @@ export const GoogleRouteMap: React.FC<GoogleRouteMapProps> = ({
         ) : null}
 
         {showTruck && route.truck ? (
-          <Marker
+          <TruckMarker
             coordinate={toLatLng(route.truck)}
-            anchor={{ x: 0.5, y: 0.5 }}
-            flat
-            rotation={route.heading}
+            heading={route.heading}
+            live={route.live && phase === 'inTransit'}
             title={vehicleNumber ? `Truck • ${vehicleNumber}` : 'Truck'}
-            tracksViewChanges={truckTracksChanges}
-            zIndex={10}
-          >
-            <TruckMarkerContent live={route.live && phase === 'inTransit'} onReady={handleTruckReady} />
-          </Marker>
+          />
         ) : null}
       </MapView>
 

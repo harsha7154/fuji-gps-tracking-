@@ -597,12 +597,16 @@ export default function ActivityScreen({
           showsVerticalScrollIndicator={true}
         >
           <AppHeader
+            variant="curved"
+            logoWidth={130}
             notificationCount={0}
+            notificationBadgeColor="#0B5FA8"
             onNotificationPress={
               handleNotificationsPress
             }
-            avatarIconColor="#0056A6"
-            avatarBackgroundColor="#EBF3FA"
+            avatarIcon="person"
+            avatarIconColor="#D97706"
+            avatarBackgroundColor="#FEF3D6"
             onAvatarPress={handleAvatarPress}
           />
 

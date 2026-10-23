@@ -12,6 +12,8 @@ interface HeaderIconButtonProps {
   size?: number;
   label?: string;
   labelColor?: string;
+  /** Stronger shadow, for buttons drawn on a photo. */
+  elevated?: boolean;
   onPress: () => void;
   accessibilityLabel: string;
 }
@@ -29,6 +31,7 @@ export const HeaderIconButton: React.FC<HeaderIconButtonProps> = ({
   size = 40,
   label,
   labelColor,
+  elevated = false,
   onPress,
   accessibilityLabel,
 }) => {
@@ -47,6 +50,7 @@ export const HeaderIconButton: React.FC<HeaderIconButtonProps> = ({
           backgroundColor,
           opacity: pressed ? 0.85 : 1,
         },
+        elevated && styles.elevated,
       ]}
     >
       {label ? (
@@ -72,6 +76,12 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
+  },
+  elevated: {
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 5,
   },
   labelText: {
     fontSize: 14,

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Image, StyleSheet, View } from 'react-native';
 
 import { RoutePhase, useRouteTracker } from '../hooks/useRouteTracker';
 import { getRoadRouteProblem } from '../services/directionsService';
@@ -124,7 +124,17 @@ const MAP_HTML = `<!DOCTYPE html>
   parent.postMessage({type:'ready'},'*');
 </script></body></html>`;
 
-const TRUCK_SRC = `data:image/svg+xml;utf8,${encodeURIComponent(TRUCK_SVG)}`;
+const TRUCK_IMAGE_ASSET = require('../../assets/images/truck-top.png');
+
+const getTruckSrc = (): string => {
+  try {
+    const resolved = Image.resolveAssetSource(TRUCK_IMAGE_ASSET);
+    if (resolved?.uri) return resolved.uri;
+  } catch {}
+  return `data:image/svg+xml;utf8,${encodeURIComponent(TRUCK_SVG)}`;
+};
+
+const TRUCK_SRC = getTruckSrc();
 
 export const GoogleRouteMap: React.FC<GoogleRouteMapProps> = ({
   dispatchKey,

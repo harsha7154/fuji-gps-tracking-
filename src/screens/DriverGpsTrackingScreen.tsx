@@ -85,8 +85,6 @@ const ARRIVAL_REPROMPT_MS = 5_000;
 // A position read back from the GPS service older than this is not shown as live
 // (same 2 minutes as the web tracker's "signal lost").
 const SERVER_LIVE_STALE_MS = 120000;
-/** GPS service unreachable when the screen opened: ask its /health again this often. */
-const LIVE_HEALTH_RETRY_MS = 15000;
 
 interface ServerLivePosition {
   coord: [number, number];
@@ -302,15 +300,21 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
   const plantLng = plantPoint?.lng ?? 0;
   const plantCoord: [number, number] = [plantLat, plantLng];
 
-  // Truck and GPS line on the map: ONLY the positions the GPS service stored in
-  // Redis, read back over ws/gps/live (same source as the web tracker). The
-  // phone's own GPS is never drawn; it is only sent to the server and used for
-  // the arrival popup. Until the first server position arrives the map shows
-  // the last saved position from the stored history.
+  // Truck on the map: the position the GPS service stored in Redis, read back over
+  // ws/gps/live (same source as the web tracker). Until the socket has delivered a
+  // position (service unreachable, socket still connecting, no ping stored yet) the
+  // truck is drawn at this phone's own GPS fix — the same fix that is being sent to
+  // the GPS service — so it never stays hidden. Once a server position arrives, only
+  // server positions move the truck.
   const serverLiveFresh = !!serverLive && Date.now() - serverLive.receivedAt < SERVER_LIVE_STALE_MS;
-  const mapLiveCoord: [number, number] = serverLive ? serverLive.coord : [0, 0];
-  const mapLiveHeading = serverLive ? serverLive.heading : 0;
-  const mapLiveAccuracy = serverLive ? serverLive.accuracy : 0;
+  const hasDeviceFix = currentLiveCoord[0] !== 0 || currentLiveCoord[1] !== 0;
+  const mapLiveCoord: [number, number] = serverLive
+    ? serverLive.coord
+    : isTracking && hasDeviceFix
+      ? currentLiveCoord
+      : [0, 0];
+  const mapLiveHeading = serverLive ? serverLive.heading : heading;
+  const mapLiveAccuracy = serverLive ? serverLive.accuracy : accuracy;
 
   // Which picture the map draws.
   const mapPhase = isArrived ? 'arrived' : isTracking ? 'inTransit' : 'planned';
@@ -1082,30 +1086,15 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
 
     let isMounted = true;
     let live: GpsLiveSocket | null = null;
-    let healthRetryTimer: ReturnType<typeof setTimeout> | null = null;
     // Time of the newest position shown, so an older snapshot never moves the truck back.
     let newestPositionTs = 0;
 
-    // While the network or the GPS service is down the truck stays at the last
-    // position received; the socket reconnects by itself and moves it again.
+    // Opened straight away, like the web Dispatch Tracker. It used to wait for /health to
+    // advertise "liveEndpoint"; a GPS service without that field (but with /ws/gps/live)
+    // never got a socket, so the truck was never drawn. GpsLiveSocket retries / backs off
+    // by itself while the service or network is down; the truck stays at the last position.
     const connectLive = () => {
-     driverGpsService.checkGpsServiceHealth().then((health) => {
       if (!isMounted) return;
-
-      // Only connect if the server explicitly advertises /ws/gps/live support.
-      const serverSupportsLive =
-        health?.status === 'UP' &&
-        (typeof (health as any).liveEndpoint === 'string' ||
-          (health as any).supportsLiveSocket === true);
-
-      if (!serverSupportsLive) {
-        gpsLog('LIVE-READ socket not opened yet — GPS service unreachable or without liveEndpoint; retry in 15 s', {
-          healthStatus: health?.status ?? 'unreachable',
-        });
-        healthRetryTimer = setTimeout(connectLive, LIVE_HEALTH_RETRY_MS);
-        return;
-      }
-
       live = new GpsLiveSocket(dispatchKey, {
         onStatusChange: (status) => {
           gpsLog('LIVE-READ socket', { status });
@@ -1132,13 +1121,11 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
         },
       });
       live.connect();
-     });
     };
     connectLive();
 
     return () => {
       isMounted = false;
-      if (healthRetryTimer) clearTimeout(healthRetryTimer);
       live?.close();
       lastLiveSocketAtRef.current = 0;
       setServerLive(null);
@@ -1248,18 +1235,26 @@ export const DriverGpsTrackingScreen: React.FC<DriverGpsTrackingScreenProps> = (
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handlePullRefresh} colors={[colors.primary]} />}
       >
         <AppHeader
-          logoWidth={100}
+          variant="curved"
+          logoWidth={130}
           notificationCount={notificationCount ?? 0}
+          notificationBadgeColor="#0B5FA8"
           onNotificationPress={onNavigateToNotifications}
-          avatarIconColor={colors.statOrangeIcon}
-          avatarBackgroundColor={colors.statOrangeBg}
+          avatarIcon="person"
+          avatarIconColor="#D97706"
+          avatarBackgroundColor="#FEF3D6"
           onAvatarPress={onNavigateToProfile}
         />
 
         <View style={styles.content}>
-          {/* Back link & Title */}
-          <Pressable onPress={onBack} hitSlop={8} style={styles.backLink}>
-            <Ionicons name="chevron-back" size={16} color={colors.primary} />
+          <Pressable
+            onPress={onBack}
+            hitSlop={8}
+            style={({ pressed }) => [styles.backLink, pressed && styles.backLinkPressed]}
+            accessibilityRole="button"
+            accessibilityLabel="Back to Dashboard"
+          >
+            <Ionicons name="chevron-back" size={16} color="#0B5FA8" />
             <Text style={styles.backLinkText}>Back to Dashboard</Text>
           </Pressable>
 
@@ -1596,10 +1591,33 @@ const styles = StyleSheet.create({
   backLink: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: -spacing.sm,
+    alignSelf: 'flex-start',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    borderRadius: 20,
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    marginTop: spacing.sm,
     marginBottom: spacing.sm,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1.5 },
+    shadowOpacity: 0.07,
+    shadowRadius: 3,
+    elevation: 2,
+    gap: 4,
   },
-  backLinkText: { ...typography.label, color: colors.primary, marginLeft: 2 },
+  backLinkPressed: {
+    opacity: 0.85,
+    transform: [{ scale: 0.97 }],
+    backgroundColor: '#F8FAFC',
+  },
+  backLinkText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0B5FA8',
+    letterSpacing: -0.1,
+  },
 
   titleRow: {
     flexDirection: 'row',

@@ -765,11 +765,14 @@ export const AppNavigator: React.FC = () => {
           error
         );
 
+        const msg = error instanceof Error ? error.message : 'Unable to send OTP. Please try again.';
+        const isRateLimited = msg.includes('429') || msg.toLowerCase().includes('too many');
+
         Alert.alert(
-          'Unable to Send OTP',
-          error instanceof Error
-            ? error.message
-            : 'Unable to send OTP. Please try again.'
+          isRateLimited ? 'Too Many Requests (429)' : 'Unable to Send OTP',
+          isRateLimited
+            ? 'You have reached the maximum limit for sending OTPs (429 Too Many Requests). Please wait a few minutes before trying again.'
+            : msg
         );
       }
     },
@@ -837,11 +840,14 @@ export const AppNavigator: React.FC = () => {
           error
         );
 
+        const msg = error instanceof Error ? error.message : 'Unable to resend OTP. Please try again.';
+        const isRateLimited = msg.includes('429') || msg.toLowerCase().includes('too many');
+
         Alert.alert(
-          'Unable to Resend OTP',
-          error instanceof Error
-            ? error.message
-            : 'Unable to resend OTP. Please try again.'
+          isRateLimited ? 'Too Many Requests (429)' : 'Unable to Resend OTP',
+          isRateLimited
+            ? 'You have reached the maximum limit for OTP requests (429 Too Many Requests). Please wait a few minutes before requesting a new OTP.'
+            : msg
         );
 
         return false;
@@ -861,16 +867,10 @@ export const AppNavigator: React.FC = () => {
       console.log('[AppNavigator] Verifying OTP...');
 
       if (!otpVerificationToken) {
-        Alert.alert(
-          'Verification Error',
-          'OTP verification session has expired. Please request a new OTP.'
-        );
-
         setOtpPhoneNumber('');
         setOtpVerificationToken('');
         setRoute('Login');
-
-        return;
+        throw new Error('OTP verification session has expired. Please request a new OTP.');
       }
 
       try {
@@ -924,13 +924,7 @@ export const AppNavigator: React.FC = () => {
             '[AppNavigator] Unsupported backend role:',
             response.user?.roles
           );
-
-          Alert.alert(
-            'Access Denied',
-            'Your account does not have access to this application.'
-          );
-
-          return;
+          throw new Error('Your account does not have access to this application.');
         }
 
         // ------------------------------------------------------------
@@ -938,11 +932,7 @@ export const AppNavigator: React.FC = () => {
         // ------------------------------------------------------------
 
         if (!response.user) {
-          Alert.alert(
-            'Login Failed',
-            'User information was not returned by the server.'
-          );
-          return;
+          throw new Error('User information was not returned by the server.');
         }
 
         const fullName =
@@ -1021,13 +1011,7 @@ export const AppNavigator: React.FC = () => {
           '[AppNavigator] OTP verification failed:',
           error
         );
-
-        Alert.alert(
-          'OTP Verification Failed',
-          error instanceof Error
-            ? error.message
-            : 'Invalid OTP. Please try again.'
-        );
+        throw error;
       }
     },
     [otpVerificationToken]
@@ -2456,8 +2440,11 @@ export const AppNavigator: React.FC = () => {
   /**
    * Last step of the journey, ONLY after the POD photo is on the server:
    * POST /o/material-dispatch-rest/complete-journey (status -> Arrived), with the position saved when
-   * the driver confirmed arrival (within 100 m). Single-flight; skipped when the server already
-   * reports Arrived. Throws when complete-journey fails (the POD screen shows the error + retry).
+   * the driver confirmed arrival (within 100 m). Single-flight. ALWAYS called (no "already arrived"
+   * pre-check): the dispatch APIs report statusDispatch 0 as soon as the truck's live GPS is within
+   * 100 m of the site, while the Material Dispatch object field is still 1 - skipping here left the
+   * object at In Transit. complete-journey is idempotent on the server.
+   * Throws when complete-journey fails (the POD screen shows the error + retry).
    */
   const completeJourneyInFlightRef = useRef<Promise<void> | null>(null);
   const completePendingJourney = useCallback(
@@ -2465,19 +2452,17 @@ export const AppNavigator: React.FC = () => {
       if (completeJourneyInFlightRef.current) return completeJourneyInFlightRef.current;
       const run = (async () => {
         const token = accessToken ?? undefined;
-        const detail = await driverGpsService
-          .loadDispatchDetail(pending.objectEntryId, pending.userId, token)
-          .catch(() => null);
-        if (detail?.statusDispatch !== DISPATCH_STATUS.ARRIVED) {
-          const deviceId = await getDeviceId();
-          await driverGpsService.completeJourney(
-            {
-              objectEntryId: pending.objectEntryId,
-              deviceId,
-              liveGPS: formatLiveGps(pending.latitude, pending.longitude),
-            },
-            token,
-          );
+        const deviceId = await getDeviceId();
+        const result = await driverGpsService.completeJourney(
+          {
+            objectEntryId: pending.objectEntryId,
+            deviceId,
+            liveGPS: formatLiveGps(pending.latitude, pending.longitude),
+          },
+          token,
+        );
+        if (result.statusDispatch !== undefined && result.statusDispatch !== DISPATCH_STATUS.ARRIVED) {
+          throw new Error('The server did not mark the dispatch as Arrived. Please try again.');
         }
         console.log('[AppNavigator] complete-journey done after POD upload:', {
           dispatchId: pending.dispatchId,

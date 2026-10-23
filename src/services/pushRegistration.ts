@@ -5,11 +5,9 @@
  *   1. After sign-in the app asks Google for this phone's FCM token
  *      (expo-notifications -> getDevicePushTokenAsync; works because google-services.json
  *      is part of the build).
- *   2. The app saves that token on the driver's Liferay user account:
- *        PATCH {LIFERAY}/o/headless-admin-user/v1.0/user-accounts/{userId}
+ *   2. The app saves that token on the driver's Liferay user account (fCMToken field):
+ *        POST {LIFERAY}/o/mobile-auth/push-token   { "fcmToken": "<token>" }
  *        Authorization: Bearer <driver access token>
- *        { "fCMToken": "<token>" }
- *      It then READS THE ACCOUNT BACK (GET) and logs whether the token is really stored.
  *   3. Liferay (service-account key of the SAME Firebase project) sends the push to
  *      FCM using that token. Android shows it even if the app is closed.
  *   4. On logout the field is cleared so the next user of this phone does not get the
@@ -20,13 +18,14 @@
  *   which stores it on the signed-in user ONLY and removes the same token from every
  *   other user (left behind by a failed logout / user switch / expired session), so the
  *   phone receives the pushes of the signed-in user and nobody else's.
- *   The PATCH below is used only when the server does not have that endpoint yet (404).
+ *   There is NO fallback to PATCH /headless-admin-user/v1.0/user-accounts/{id}: on Liferay
+ *   2026.q2 that PATCH (fCMToken is a User-object extension field) fails with
+ *   "StaleStateException ... update User_ set mvccVersion=?, modifiedDate=?". A server
+ *   without /push-token (404) simply gets no registration until the module is deployed.
  *
  * LOGS - filter the Metro / `adb logcat -s ReactNativeJS` output with  [push]
  *   [push] token ...        FCM token obtained from Google
- *   [push] PATCH ...        what was sent to Liferay and the HTTP status
- *   [push] STORED OK        Liferay really has the token (read back)
- *   [push] NOT STORED       PATCH was accepted but the token is not visible -> field name/shape problem
+ *   [push] STORED OK        Liferay saved the token on the signed-in user
  *   [push] RECEIVED (push)  an FCM message arrived while the app is OPEN
  *   [push] TAPPED           the user tapped a notification (push or local)
  *   [push] LAUNCHED BY TAP  the app was closed and was opened by tapping a notification
@@ -44,17 +43,12 @@ import { loadNotificationsModule } from '../utils/optionalNativeModules';
 import { appStorage } from './sessionStorage';
 import { isBackgroundNotificationsEnabled } from './appSettings';
 
-const FIELD = 'fCMToken';
 const STORED_KEY = 'fuji_push_registration';
-const STYLE_KEY = 'fuji_push_field_style';
 /** Re-send the registration at least this often (heals a lost / overwritten token). */
 const REREGISTER_EVERY_MS = 30 * 60 * 1000;
 const RETRY_DELAYS_MS = [15_000, 60_000, 5 * 60_000];
 const REQUEST_TIMEOUT_MS = 10_000;
 const LOGOUT_TIMEOUT_MS = 4_000;
-
-/** How the token is written on the user account. 'top' = {fCMToken}, 'custom' = {customFields:[...]}. */
-type FieldStyle = 'top' | 'custom';
 
 let lastOkAt = 0;
 /** Always the CURRENT signed-in user + token, so a retry never reuses an expired access token. */
@@ -93,81 +87,7 @@ export function isPushConfigured(): boolean {
   return Platform.OS === 'android';
 }
 
-// ── Liferay calls ────────────────────────────────────────────────────────────
-
-async function liferayFetch(
-  method: 'GET' | 'PATCH',
-  userId: string,
-  accessToken: string,
-  body?: unknown,
-  timeoutMs = REQUEST_TIMEOUT_MS,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(`${getBaseUrl()}/o/headless-admin-user/v1.0/user-accounts/${encodeURIComponent(userId)}`, {
-      method,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function buildBody(style: FieldStyle, value: string) {
-  return style === 'top'
-    ? { [FIELD]: value }
-    : { customFields: [{ name: FIELD, customValue: { data: value } }] };
-}
-
-/** Reads the account back and returns what Liferay has stored in the field (null = not visible). */
-async function readStoredToken(userId: string, accessToken: string): Promise<string | null> {
-  const res = await liferayFetch('GET', userId, accessToken);
-  if (!res.ok) {
-    warn(`GET user-accounts/${userId} failed, HTTP ${res.status}`);
-    return null;
-  }
-  const account: any = await res.json().catch(() => null);
-  if (!account) return null;
-  if (typeof account[FIELD] === 'string') return account[FIELD];
-  const custom = Array.isArray(account.customFields)
-    ? account.customFields.find((f: any) => f?.name === FIELD)
-    : null;
-  const data = custom?.customValue?.data;
-  return typeof data === 'string' ? data : null;
-}
-
-/** PATCHes the token in one style and verifies it by reading it back. Returns true if Liferay has it. */
-async function saveOnLiferay(auth: PushAuth, fcmToken: string, style: FieldStyle): Promise<boolean> {
-  log(`PATCH user-accounts/${auth.userId} style=${style} token=${tail(fcmToken)}`);
-  const res = await liferayFetch('PATCH', auth.userId, auth.accessToken, buildBody(style, fcmToken));
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    warn(`PATCH style=${style} refused, HTTP ${res.status}`, text.slice(0, 300));
-    if (res.status === 401 || res.status === 403) {
-      warn('401/403 = the driver token may be expired or the driver role is not allowed to update their own account');
-    }
-    return false;
-  }
-  log(`PATCH style=${style} accepted, HTTP ${res.status} - reading the account back to verify...`);
-  const stored = await readStoredToken(auth.userId, auth.accessToken);
-  if (stored === fcmToken) {
-    log(`STORED OK (style=${style}) - Liferay has token ${tail(fcmToken)} for user ${auth.userId}`);
-    return true;
-  }
-  warn(
-    `NOT STORED (style=${style}) - PATCH returned ${res.status} but the account shows ` +
-      `${stored ? `a different token ${tail(stored)}` : 'no fCMToken value'}. ` +
-      'Ask the Liferay team: is "fCMToken" a real field on user-accounts, and what is its exact name/shape?',
-  );
-  return false;
-}
+// ── Liferay call ─────────────────────────────────────────────────────────────
 
 type ServerResult = 'ok' | 'unsupported' | 'failed';
 
@@ -190,7 +110,7 @@ async function saveOnServer(auth: PushAuth, fcmToken: string, timeoutMs = REQUES
       signal: controller.signal,
     });
     if (res.status === 404 || res.status === 405) {
-      warn(`push-token endpoint not on this server (HTTP ${res.status}) - using the old PATCH`);
+      warn(`push-token endpoint not on this server (HTTP ${res.status}) - deploy the anganwadi-rest module`);
       return 'unsupported';
     }
     const body: any = await res.json().catch(() => null);
@@ -248,15 +168,6 @@ async function readStored(): Promise<StoredRegistration | null> {
   }
 }
 
-async function readStyle(): Promise<FieldStyle | null> {
-  try {
-    const v = await appStorage.getItem(STYLE_KEY);
-    return v === 'top' || v === 'custom' ? v : null;
-  } catch {
-    return null;
-  }
-}
-
 // ── public API ───────────────────────────────────────────────────────────────
 
 /** Saves this phone's FCM token on the signed-in driver's Liferay account. Returns true on success. */
@@ -303,19 +214,6 @@ async function registerOnce(auth: PushAuth): Promise<boolean> {
       await appStorage.setItem(STORED_KEY, JSON.stringify({ fcmToken, userId: auth.userId } satisfies StoredRegistration));
       return true;
     }
-    if (server === 'failed') return false;
-
-    // Old server without /push-token: try the style that worked last time first, then the other one.
-    const remembered = await readStyle();
-    const order: FieldStyle[] = remembered === 'custom' ? ['custom', 'top'] : ['top', 'custom'];
-    for (const style of order) {
-      if (await saveOnLiferay(auth, fcmToken, style)) {
-        await appStorage.setItem(STYLE_KEY, style).catch(() => { });
-        await appStorage.setItem(STORED_KEY, JSON.stringify({ fcmToken, userId: auth.userId } satisfies StoredRegistration));
-        return true;
-      }
-    }
-    warn('FAILED: Liferay did not keep the token with either field style. Push cannot work until this is fixed.');
     return false;
   } catch (err) {
     warn('registration failed (network?):', err);
@@ -359,12 +257,8 @@ export async function unregisterFromPush(auth: PushAuth | null): Promise<void> {
       warn('logout: no access token, cannot clear the token on Liferay');
       return;
     }
-    const server = await saveOnServer(auth, '', LOGOUT_TIMEOUT_MS);
-    if (server !== 'unsupported') return;
-    const style = (await readStyle()) ?? 'top';
     log(`logout: clearing token ${tail(stored.fcmToken)} on user ${auth.userId}`);
-    const res = await liferayFetch('PATCH', auth.userId, auth.accessToken, buildBody(style, ''), LOGOUT_TIMEOUT_MS);
-    log(`logout: clear request HTTP ${res.status}`);
+    await saveOnServer(auth, '', LOGOUT_TIMEOUT_MS);
   } catch (err) {
     warn('logout: could not clear the token (Liferay should drop dead tokens when FCM reports them):', err);
   }

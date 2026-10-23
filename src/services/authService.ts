@@ -97,11 +97,23 @@ async function sendOtp(
     throw new Error(authErr.message);
   }
 
+  if (response.status === 429) {
+    let serverMsg: string | undefined;
+    try {
+      const parsed = await response.json();
+      serverMsg = parsed?.error || parsed?.message;
+    } catch {
+      // not JSON
+    }
+    throw new Error(
+      serverMsg || '429 Too Many Requests: You have reached the maximum attempt limit for OTP requests. Please wait a few minutes before trying again.'
+    );
+  }
+
   let data: SendOtpResponse;
 
   try {
-    data =
-      (await response.json()) as SendOtpResponse;
+    data = (await response.json()) as SendOtpResponse;
   } catch {
     throw new Error(
       `Send OTP failed with status ${response.status}.`,
@@ -161,6 +173,19 @@ async function verifyOtp(
   } catch (err) {
     const authErr = toAuthError(err);
     throw new Error(authErr.message);
+  }
+
+  if (response.status === 429) {
+    let serverMsg: string | undefined;
+    try {
+      const parsed = await response.json();
+      serverMsg = parsed?.error || parsed?.message;
+    } catch {
+      // not JSON
+    }
+    throw new Error(
+      serverMsg || '429 Too Many Requests: Too many verification attempts. Please wait a few minutes before trying again.'
+    );
   }
 
   let data:

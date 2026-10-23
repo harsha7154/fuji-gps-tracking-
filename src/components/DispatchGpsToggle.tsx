@@ -141,24 +141,26 @@ export const DispatchGpsToggle: React.FC<DispatchGpsToggleProps> = ({
   if (statusDispatch === DISPATCH_STATUS.IN_TRANSIT) {
     return (
       <View style={styles.wrapper}>
-        <Pressable
-          onPress={handleOpenLiveGps}
-          accessibilityRole="button"
-          accessibilityLabel="Open live GPS tracking"
-          style={({ pressed }) => [styles.btnViewLiveGps, pressed && styles.pressed]}
-        >
-          <Ionicons name="location" size={16} color={colors.white} style={styles.icon} />
-          <Text style={styles.btnTextWhite}>Live GPS →</Text>
-        </Pressable>
-        <Pressable
-          onPress={handleOpenMaps}
-          accessibilityRole="button"
-          accessibilityLabel="Open Maps navigation to the site"
-          style={({ pressed }) => [styles.btnOpenMaps, pressed && styles.pressed]}
-        >
-          <Ionicons name="navigate" size={16} color={colors.white} style={styles.icon} />
-          <Text style={styles.btnTextWhite}>Open Maps</Text>
-        </Pressable>
+        <View style={styles.actionRow}>
+          <Pressable
+            onPress={handleOpenLiveGps}
+            accessibilityRole="button"
+            accessibilityLabel="Open live GPS tracking"
+            style={({ pressed }) => [styles.btnActivate, pressed && styles.pressed]}
+          >
+            <Ionicons name="location" size={17} color={colors.white} style={styles.icon} />
+            <Text style={styles.btnTextWhite}>Live GPS →</Text>
+          </Pressable>
+          <Pressable
+            onPress={handleOpenMaps}
+            accessibilityRole="button"
+            accessibilityLabel="Open Maps navigation to the site"
+            style={({ pressed }) => [styles.btnViewMap, pressed && styles.pressed]}
+          >
+            <Ionicons name="map-outline" size={17} color="#0B5FA8" style={styles.icon} />
+            <Text style={styles.btnViewMapText}>View Map</Text>
+          </Pressable>
+        </View>
       </View>
     );
   }
@@ -167,42 +169,44 @@ export const DispatchGpsToggle: React.FC<DispatchGpsToggleProps> = ({
   if (statusDispatch === DISPATCH_STATUS.DISPATCHED) {
     return (
       <View style={styles.wrapper}>
-        <Pressable
-          onPress={handleActivate}
-          disabled={loading}
-          accessibilityRole="button"
-          accessibilityLabel="Activate journey"
-          accessibilityState={{ disabled: loading, busy: loading }}
-          style={({ pressed }) => [
-            styles.btnActivate,
-            loading && styles.btnActivating,
-            pressed && !loading && styles.pressed,
-          ]}
-        >
-          {loading ? (
-            <>
-              <ActivityIndicator size="small" color={colors.white} style={styles.icon} />
-              <Text style={styles.btnTextWhite}>{loadingLabel}</Text>
-            </>
-          ) : (
-            <>
-              <Ionicons name="play-circle" size={16} color={colors.white} style={styles.icon} />
-              <Text style={styles.btnTextWhite}>Activate Journey</Text>
-            </>
-          )}
-        </Pressable>
-        {error ? <Text style={styles.errorText}>{error}</Text> : null}
-        {onOpenLiveGps ? (
+        <View style={styles.actionRow}>
           <Pressable
-            onPress={handleOpenLiveGps}
+            onPress={handleActivate}
+            disabled={loading}
             accessibilityRole="button"
-            accessibilityLabel="View the map"
-            style={({ pressed }) => [styles.btnViewRoute, pressed && styles.pressed]}
+            accessibilityLabel="Activate journey"
+            accessibilityState={{ disabled: loading, busy: loading }}
+            style={({ pressed }) => [
+              styles.btnActivate,
+              loading && styles.btnActivating,
+              pressed && !loading && styles.pressed,
+            ]}
           >
-            <Ionicons name="map-outline" size={15} color={colors.primary} style={styles.icon} />
-            <Text style={styles.btnViewRouteText}>View Map</Text>
+            {loading ? (
+              <>
+                <ActivityIndicator size="small" color={colors.white} style={styles.icon} />
+                <Text style={styles.btnTextWhite}>{loadingLabel}</Text>
+              </>
+            ) : (
+              <>
+                <Ionicons name="play-circle" size={18} color={colors.white} style={styles.icon} />
+                <Text style={styles.btnTextWhite}>Activate Journey</Text>
+              </>
+            )}
           </Pressable>
-        ) : null}
+          {onOpenLiveGps ? (
+            <Pressable
+              onPress={handleOpenLiveGps}
+              accessibilityRole="button"
+              accessibilityLabel="View the map"
+              style={({ pressed }) => [styles.btnViewMap, pressed && styles.pressed]}
+            >
+              <Ionicons name="map-outline" size={18} color="#0B5FA8" style={styles.icon} />
+              <Text style={styles.btnViewMapText}>View Map</Text>
+            </Pressable>
+          ) : null}
+        </View>
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
       </View>
     );
   }
@@ -212,8 +216,13 @@ export const DispatchGpsToggle: React.FC<DispatchGpsToggleProps> = ({
 
 const styles = StyleSheet.create({
   wrapper: {
-    marginTop: spacing.sm,
+    marginTop: spacing.xs,
     alignItems: 'stretch',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
   },
   icon: {
     marginRight: 6,
@@ -222,35 +231,35 @@ const styles = StyleSheet.create({
     opacity: 0.85,
   },
   btnActivate: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#0284c7', // vibrant blue
-    paddingVertical: 10,
-    paddingHorizontal: spacing.md,
+    backgroundColor: '#0B5FA8',
+    paddingVertical: 12,
+    paddingHorizontal: spacing.sm,
     borderRadius: radius.md,
   },
   btnActivating: {
-    backgroundColor: '#0369a1',
+    backgroundColor: '#08477e',
   },
-  btnViewLiveGps: {
+  btnViewMap: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#16a34a', // vibrant green
-    paddingVertical: 10,
-    paddingHorizontal: spacing.md,
+    paddingVertical: 11,
+    paddingHorizontal: spacing.sm,
     borderRadius: radius.md,
+    borderWidth: 1.5,
+    borderColor: '#0B5FA8',
+    backgroundColor: colors.white,
   },
-  btnOpenMaps: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 6,
-    backgroundColor: '#1d4ed8', // blue — navigation
-    paddingVertical: 10,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.md,
+  btnViewMapText: {
+    ...typography.label,
+    fontSize: 13.5,
+    fontWeight: '700',
+    color: '#0B5FA8',
   },
   btnViewRoute: {
     flexDirection: 'row',
@@ -274,7 +283,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#dcfce7', // soft green
+    backgroundColor: '#dcfce7',
     borderWidth: 1,
     borderColor: '#bbf7d0',
     paddingVertical: 10,
@@ -289,14 +298,14 @@ const styles = StyleSheet.create({
   },
   btnTextWhite: {
     ...typography.label,
-    fontSize: 13,
+    fontSize: 13.5,
     fontWeight: '700',
     color: colors.white,
   },
   errorText: {
     ...typography.caption,
     color: colors.error,
-    marginTop: 4,
+    marginTop: 6,
     textAlign: 'center',
   },
 });

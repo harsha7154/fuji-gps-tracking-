@@ -279,13 +279,16 @@ export const DriverTripHistoryScreen: React.FC<DriverTripHistoryScreenProps> = (
       >
         {/* 1. APP HEADER */}
         <AppHeader
-          logoWidth={105}
+          variant="curved"
+          logoWidth={130}
+          backLabel="Back to Dashboard"
+          onBack={onBack ?? onNavigateToDashboard}
           notificationCount={notificationCount}
-          notificationBadgeColor="#EF4444"
+          notificationBadgeColor="#0B5FA8"
           onNotificationPress={onNavigateToNotifications}
-          avatarLabel={avatarInitials}
-          avatarBackgroundColor="#FFEDD5"
-          avatarIconColor="#9A3412"
+          avatarIcon="person"
+          avatarBackgroundColor="#FEF3D6"
+          avatarIconColor="#D97706"
           onAvatarPress={onNavigateToProfile}
         />
 
@@ -294,7 +297,6 @@ export const DriverTripHistoryScreen: React.FC<DriverTripHistoryScreenProps> = (
           title="Trip History & Logs"
           subtitle="Completed Logistics Runs"
           categoryBadge="LOGISTICS"
-          onBack={onBack ?? onNavigateToDashboard}
         />
 
         {/* 3. FILTER TABS */}

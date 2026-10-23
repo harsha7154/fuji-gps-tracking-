@@ -25,6 +25,7 @@ import {
 import { getNotificationText, getNotificationTitle } from '../utils/notificationContent';
 import { apiClient } from '../api/client';
 import { fetchCached, peekQuery, qk, queryClient, refetchFresh } from '../query/queryClient';
+import { AppHeader } from '../components/AppHeader';
 
 interface NotificationsScreenProps {
     accessToken: string;
@@ -797,19 +798,34 @@ export const NotificationsScreen: React.FC<
 
         const emptyText = EMPTY_TEXT[filter];
 
-        return (
-            <View style={[styles.root, { paddingTop: insets.top }]}>
-                {/* Header */}
+        const renderListHeader = () => (
+            <View>
+                {/* 1. TOP HERO HEADER */}
+                <AppHeader
+                    variant="curved"
+                    logoWidth={130}
+                    notificationCount={unreadCount}
+                    notificationBadgeColor="#0B5FA8"
+                    showNotification={true}
+                    avatarIcon="person"
+                    avatarIconColor="#D97706"
+                    avatarBackgroundColor="#FEF3D6"
+                    onAvatarPress={onBack}
+                    backLabel="Back"
+                    onBack={onBack}
+                />
+
+                {/* Header bar */}
                 {selectionMode ? (
                     <View style={styles.header}>
                         <Pressable
                             onPress={exitSelection}
                             hitSlop={10}
-                            style={styles.backButton}
+                            style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}
                             accessibilityRole="button"
                             accessibilityLabel="Cancel selection"
                         >
-                            <Ionicons name="close" size={24} color={colors.textPrimary} />
+                            <Ionicons name="close" size={20} color="#0B5FA8" />
                         </Pressable>
 
                         <View style={styles.headerTitleBlock}>
@@ -858,76 +874,66 @@ export const NotificationsScreen: React.FC<
                         </Pressable>
                     </View>
                 ) : (
-                <View style={styles.header}>
-                    <Pressable
-                        onPress={onBack}
-                        hitSlop={10}
-                        style={styles.backButton}
-                        accessibilityRole="button"
-                        accessibilityLabel="Back"
-                    >
-                        <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
-                    </Pressable>
+                    <View style={styles.header}>
+                        <View style={styles.headerTitleBlock}>
+                            <Text style={styles.headerTitle}>Notifications</Text>
+                            <Text style={styles.headerSubtitle}>
+                                {loading
+                                    ? 'Loading…'
+                                    : unreadCount > 0
+                                        ? `${unreadCount} unread`
+                                        : 'All caught up'}
+                            </Text>
+                        </View>
 
-                    <View style={styles.headerTitleBlock}>
-                        <Text style={styles.headerTitle}>Notifications</Text>
-                        <Text style={styles.headerSubtitle}>
-                            {loading
-                                ? 'Loading…'
-                                : unreadCount > 0
-                                    ? `${unreadCount} unread`
-                                    : 'All caught up'}
-                        </Text>
+                        <Pressable
+                            onPress={markAllAsRead}
+                            disabled={unreadCount === 0 || markingAll || loading}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Mark all as read"
+                            style={({ pressed }) => [
+                                styles.markAllButton,
+                                (unreadCount === 0 || loading) && styles.markAllButtonDisabled,
+                                pressed && styles.chipPressed,
+                            ]}
+                        >
+                            {markingAll ? (
+                                <ActivityIndicator size="small" color={colors.primary} />
+                            ) : (
+                                <>
+                                    <Ionicons
+                                        name="checkmark-done"
+                                        size={16}
+                                        color={unreadCount === 0 || loading ? colors.disabled : colors.primary}
+                                    />
+                                    <Text
+                                        style={[
+                                            styles.markAllText,
+                                            (unreadCount === 0 || loading) && styles.markAllTextDisabled,
+                                        ]}
+                                    >
+                                        Mark all read
+                                    </Text>
+                                </>
+                            )}
+                        </Pressable>
+
+                        <Pressable
+                            onPress={() => enterSelection()}
+                            disabled={loading || filtered.length === 0}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Select notifications"
+                            style={({ pressed }) => [styles.headerIconButton, pressed && styles.chipPressed]}
+                        >
+                            <Ionicons
+                                name="checkbox-outline"
+                                size={22}
+                                color={loading || filtered.length === 0 ? colors.disabled : colors.primary}
+                            />
+                        </Pressable>
                     </View>
-
-                    <Pressable
-                        onPress={markAllAsRead}
-                        disabled={unreadCount === 0 || markingAll || loading}
-                        hitSlop={8}
-                        accessibilityRole="button"
-                        accessibilityLabel="Mark all as read"
-                        style={({ pressed }) => [
-                            styles.markAllButton,
-                            (unreadCount === 0 || loading) && styles.markAllButtonDisabled,
-                            pressed && styles.chipPressed,
-                        ]}
-                    >
-                        {markingAll ? (
-                            <ActivityIndicator size="small" color={colors.primary} />
-                        ) : (
-                            <>
-                                <Ionicons
-                                    name="checkmark-done"
-                                    size={16}
-                                    color={unreadCount === 0 || loading ? colors.disabled : colors.primary}
-                                />
-                                <Text
-                                    style={[
-                                        styles.markAllText,
-                                        (unreadCount === 0 || loading) && styles.markAllTextDisabled,
-                                    ]}
-                                >
-                                    Mark all read
-                                </Text>
-                            </>
-                        )}
-                    </Pressable>
-
-                    <Pressable
-                        onPress={() => enterSelection()}
-                        disabled={loading || filtered.length === 0}
-                        hitSlop={8}
-                        accessibilityRole="button"
-                        accessibilityLabel="Select notifications"
-                        style={({ pressed }) => [styles.headerIconButton, pressed && styles.chipPressed]}
-                    >
-                        <Ionicons
-                            name="checkbox-outline"
-                            size={22}
-                            color={loading || filtered.length === 0 ? colors.disabled : colors.primary}
-                        />
-                    </Pressable>
-                </View>
                 )}
 
                 {/* Filter tabs */}
@@ -979,59 +985,47 @@ export const NotificationsScreen: React.FC<
                         <Text style={styles.bannerText}>{banner}</Text>
                     </View>
                 ) : null}
+            </View>
+        );
 
-                {loading ? (
-                    <View style={styles.center}>
-                        <ActivityIndicator size="large" color={colors.primary} />
-                        <Text style={styles.loadingText}>Loading notifications...</Text>
-                    </View>
-                ) : error ? (
-                    <View style={styles.center}>
-                        <View style={styles.emptyIconCircle}>
-                            <Ionicons name="cloud-offline-outline" size={30} color={colors.textSecondary} />
-                        </View>
-                        <Text style={styles.emptyTitle}>Something went wrong</Text>
-                        <Text style={styles.emptyText}>{error}</Text>
-                        <Pressable onPress={() => loadNotifications()} style={styles.retryButton}>
-                            <Text style={styles.retryText}>Try Again</Text>
-                        </Pressable>
-                    </View>
-                ) : (
-                    <SectionList
-                        sections={sections}
-                        keyExtractor={(item) => String(item.id)}
-                        renderItem={renderNotification}
-                        renderSectionHeader={({ section }) => (
-                            <Text style={styles.sectionHeader}>{section.title.toUpperCase()}</Text>
-                        )}
-                        stickySectionHeadersEnabled={false}
-                        contentContainerStyle={[
-                            styles.listContent,
-                            sections.length === 0 && styles.emptyListContent,
-                        ]}
-                        showsVerticalScrollIndicator={false}
-                        refreshing={refreshing}
-                        onRefresh={() => loadNotifications(true)}
-                        onEndReached={handleEndReached}
-                        onEndReachedThreshold={LOAD_MORE_THRESHOLD}
-                        ListFooterComponent={
-                            loadingMore ? (
-                                <View style={styles.listFooter}>
-                                    <ActivityIndicator size="small" color={colors.primary} />
-                                    <Text style={styles.listFooterText}>Loading more…</Text>
+        return (
+            <View style={styles.root}>
+                <SectionList
+                    ListHeaderComponent={renderListHeader()}
+                    sections={sections}
+                    keyExtractor={(item) => String(item.id)}
+                    renderItem={renderNotification}
+                    renderSectionHeader={({ section }) => (
+                        <Text style={styles.sectionHeader}>{section.title.toUpperCase()}</Text>
+                    )}
+                    stickySectionHeadersEnabled={false}
+                    contentContainerStyle={[
+                        styles.listContent,
+                        sections.length === 0 && styles.emptyListContent,
+                    ]}
+                    showsVerticalScrollIndicator={false}
+                    refreshing={refreshing}
+                    onRefresh={() => loadNotifications(true)}
+                    onEndReached={handleEndReached}
+                    onEndReachedThreshold={LOAD_MORE_THRESHOLD}
+                    ListEmptyComponent={
+                        loading ? (
+                            <View style={styles.center}>
+                                <ActivityIndicator size="large" color={colors.primary} />
+                                <Text style={styles.loadingText}>Loading notifications...</Text>
+                            </View>
+                        ) : error ? (
+                            <View style={styles.center}>
+                                <View style={styles.emptyIconCircle}>
+                                    <Ionicons name="cloud-offline-outline" size={30} color={colors.textSecondary} />
                                 </View>
-                            ) : loadMoreError ? (
-                                <Pressable onPress={loadMore} style={styles.listFooter} hitSlop={8}>
-                                    <Ionicons name="refresh" size={16} color={colors.primary} />
-                                    <Text style={[styles.listFooterText, styles.listFooterRetry]}>
-                                        {loadMoreError} Tap to retry
-                                    </Text>
+                                <Text style={styles.emptyTitle}>Something went wrong</Text>
+                                <Text style={styles.emptyText}>{error}</Text>
+                                <Pressable onPress={() => loadNotifications()} style={styles.retryButton}>
+                                    <Text style={styles.retryText}>Try Again</Text>
                                 </Pressable>
-                            ) : !hasMore && notifications.length > 0 ? (
-                                <Text style={styles.listEndText}>You're all caught up</Text>
-                            ) : null
-                        }
-                        ListEmptyComponent={
+                            </View>
+                        ) : (
                             <View style={styles.center}>
                                 <View style={styles.emptyIconCircle}>
                                     <Ionicons name={emptyText.icon} size={30} color={colors.primary} />
@@ -1039,9 +1033,26 @@ export const NotificationsScreen: React.FC<
                                 <Text style={styles.emptyTitle}>{emptyText.title}</Text>
                                 <Text style={styles.emptyText}>{emptyText.body}</Text>
                             </View>
-                        }
-                    />
-                )}
+                        )
+                    }
+                    ListFooterComponent={
+                        loadingMore ? (
+                            <View style={styles.listFooter}>
+                                <ActivityIndicator size="small" color={colors.primary} />
+                                <Text style={styles.listFooterText}>Loading more…</Text>
+                            </View>
+                        ) : loadMoreError ? (
+                            <Pressable onPress={loadMore} style={styles.listFooter} hitSlop={8}>
+                                <Ionicons name="refresh" size={16} color={colors.primary} />
+                                <Text style={[styles.listFooterText, styles.listFooterRetry]}>
+                                    {loadMoreError} Tap to retry
+                                </Text>
+                            </Pressable>
+                        ) : !hasMore && notifications.length > 0 ? (
+                            <Text style={styles.listEndText}>You're all caught up</Text>
+                        ) : null
+                    }
+                />
             </View>
         );
     };
@@ -1056,15 +1067,32 @@ const styles = StyleSheet.create({
     header: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: spacing.sm,
-        paddingVertical: spacing.xs,
+        paddingHorizontal: spacing.md,
+        paddingVertical: spacing.sm,
         backgroundColor: colors.white,
+        borderBottomWidth: 1,
+        borderBottomColor: '#F1F5F9',
     },
     backButton: {
-        width: 40,
-        height: 40,
+        width: 38,
+        height: 38,
+        borderRadius: 12,
+        backgroundColor: '#FFFFFF',
+        borderWidth: 1.5,
+        borderColor: '#E2E8F0',
         alignItems: 'center',
         justifyContent: 'center',
+        marginRight: spacing.xs,
+        shadowColor: '#0F172A',
+        shadowOffset: { width: 0, height: 1.5 },
+        shadowOpacity: 0.08,
+        shadowRadius: 3,
+        elevation: 2,
+    },
+    backButtonPressed: {
+        opacity: 0.85,
+        transform: [{ scale: 0.94 }],
+        backgroundColor: '#F8FAFC',
     },
     headerTitleBlock: {
         flex: 1,

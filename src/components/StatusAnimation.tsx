@@ -1,30 +1,29 @@
 /**
- * Full-card status animation used while data is loading or when it cannot be loaded.
+ * Status animation shown in the CENTRE of the screen (like a payment-app tick), no card around it.
  *
  *   kind="loading"  Delivery truck animation  (request in progress)
  *   kind="offline"  No-internet animation     (no network, server or API down) + Retry button
  *
+ * The block takes the free height of the screen (window height minus the header / tab bar
+ * around it) and centres the animation in it, on every phone size.
+ *
  * Needs the `lottie-react-native` package:  npx expo install lottie-react-native
- * (then rebuild the dev client / APK). If the native module is missing the card falls back to a
- * spinner / icon, so the screen never crashes.
+ * (then rebuild the dev client / APK). If the native module is missing - and always on web
+ * (see LottieView.ts) - a spinner / icon is shown instead, so the screen never crashes.
  */
 import React from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
+import LottieView from './LottieView';
 import { colors, spacing, typography } from '../theme';
 
-const TRUCK_ANIMATION = require('../../assets/animations/delivery-truck-loading.json');
+const TRUCK_ANIMATION = require('../../assets/animations/truck-material-onsite.json');
 const OFFLINE_ANIMATION = require('../../assets/animations/no-internet.json');
 
-let LottieView: any = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const lottie = require('lottie-react-native');
-  LottieView = lottie?.default ?? lottie;
-} catch {
-  LottieView = null;
-}
+/** Space taken by the app header, back link and bottom tab bar around the animation. */
+const SURROUNDING_UI_HEIGHT = 300;
+const MIN_BLOCK_HEIGHT = 320;
 
 export interface StatusAnimationProps {
   kind: 'loading' | 'offline';
@@ -34,19 +33,28 @@ export interface StatusAnimationProps {
 }
 
 export const StatusAnimation: React.FC<StatusAnimationProps> = ({ kind, title, message, onRetry }) => {
+  const { width, height } = useWindowDimensions();
   const isOffline = kind === 'offline';
 
+  // Animation size follows the screen width (small phones -> smaller, tablets capped).
+  const animationSize = Math.round(Math.min(width * (isOffline ? 0.45 : 0.6), isOffline ? 200 : 260));
+  const blockHeight = Math.max(MIN_BLOCK_HEIGHT, height - SURROUNDING_UI_HEIGHT);
+
   return (
-    <View style={styles.card}>
+    <View
+      style={[styles.block, { minHeight: blockHeight }]}
+      accessibilityRole={isOffline ? undefined : 'progressbar'}
+      accessibilityLabel={title}
+    >
       {LottieView ? (
         <LottieView
           source={isOffline ? OFFLINE_ANIMATION : TRUCK_ANIMATION}
           autoPlay
           loop
-          style={isOffline ? styles.offlineAnimation : styles.truckAnimation}
+          style={{ width: animationSize, height: animationSize }}
         />
       ) : isOffline ? (
-        <Ionicons name="cloud-offline-outline" size={44} color={colors.statRedIcon} />
+        <Ionicons name="cloud-offline-outline" size={56} color={colors.statRedIcon} />
       ) : (
         <ActivityIndicator size="large" color={colors.primary} />
       )}
@@ -65,29 +73,16 @@ export const StatusAnimation: React.FC<StatusAnimationProps> = ({ kind, title, m
 };
 
 const styles = StyleSheet.create({
-  card: {
+  block: {
     alignItems: 'center',
-    paddingVertical: spacing.lg,
+    justifyContent: 'center',
     paddingHorizontal: spacing.md,
-    marginTop: spacing.md,
-    borderRadius: 12,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  truckAnimation: {
-    width: 220,
-    height: 220,
-  },
-  offlineAnimation: {
-    width: 160,
-    height: 160,
   },
   title: {
     ...typography.body,
     fontWeight: '700',
     color: colors.textPrimary,
-    marginTop: spacing.xs,
+    marginTop: spacing.sm,
     textAlign: 'center',
   },
   message: {

@@ -282,17 +282,16 @@ export const MyTripScreen: React.FC<MyTripScreenProps> = ({
       >
         {/* 1. EXISTING APP HEADER */}
         <AppHeader
-          logoWidth={105}
+          variant="photo"
+          logoWidth={130}
+          backLabel="Back to Dashboard"
+          onBack={onBack ?? onNavigateToDashboard}
           notificationCount={activeNotificationCount}
-          notificationBadgeColor="#EF4444"
+          notificationBadgeColor="#0B5FA8"
           onNotificationPress={onNavigateToNotifications}
-          avatarLabel={
-            tripData?.driverInitials && tripData.driverInitials !== '—'
-              ? tripData.driverInitials
-              : undefined
-          }
-          avatarBackgroundColor="#FFEDD5"
-          avatarIconColor="#9A3412"
+          avatarIcon="person"
+          avatarBackgroundColor="#FEF3D6"
+          avatarIconColor="#D97706"
           onAvatarPress={onNavigateToProfile}
         />
 
@@ -301,7 +300,6 @@ export const MyTripScreen: React.FC<MyTripScreenProps> = ({
           title="Trip Details & Manifest"
           tripId={tripData?.tripId}
           categoryBadge={tripData?.categoryBadge || 'LOGISTICS'}
-          onBack={onBack ?? onNavigateToDashboard}
         />
 
         {/* CONTENT STATES */}

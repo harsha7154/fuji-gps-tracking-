@@ -250,7 +250,7 @@ export class GpsLiveSocket {
     } catch {
       return; // "pong" etc.
     }
-    if (!message || !message.type) return;
+    if (!message || typeof message !== 'object') return;
 
     if (message.type === 'snapshot') {
       const location = message.location;
@@ -262,10 +262,13 @@ export class GpsLiveSocket {
         if (p) this.callbacks.onPosition?.(p, true);
       }
       if (isArrivedStatus(message.journeyStatus)) this.callbacks.onArrived?.();
-    } else if (message.type === 'gps') {
+    } else if (message.type === 'journey' || message.arrived === true) {
+      if (message.arrived === true || isArrivedStatus(message.journeyStatus)) this.callbacks.onArrived?.();
+    } else {
+      // Any other message with coordinates is a position ("gps", or a build that sends no
+      // type) — same rule as the web tracker, which accepts every message with lat/lng.
       const p = readLivePosition(message);
       if (p) this.callbacks.onPosition?.(p, false);
-    } else if (message.type === 'journey') {
       if (isArrivedStatus(message.journeyStatus)) this.callbacks.onArrived?.();
     }
   }

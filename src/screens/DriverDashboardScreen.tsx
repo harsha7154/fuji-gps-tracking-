@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
-  AppState,
+  Image,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -10,58 +10,81 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 
 import { AppHeader } from '../components/AppHeader';
 import { DispatchGpsToggle } from '../components/DispatchGpsToggle';
 import { DriverBottomTabBar, DriverBottomTabKey } from '../components/DriverBottomTabBar';
-import { PrimaryButton } from '../components/PrimaryButton';
 import { useQuery } from '@tanstack/react-query';
 import { qk, queryClient } from '../query/queryClient';
 import { driverDashboardService } from '../services/driverDashboardService';
 import { onJourneyChanged } from '../services/driverGpsService';
+import { onPushReceived } from '../services/pushRegistration';
 import type { UserProfile } from '../types/auth';
-import type { DispatchItem, DriverDashboardData, DriverWorkflowKey } from '../types/driverDashboard';
+import type { DispatchItem, DriverDashboardData } from '../types/driverDashboard';
 import { DISPATCH_STATUS, getDispatchStatusLabel } from '../utils/dispatchStatus';
 import { arrivalConfirmationService } from '../services/arrivalConfirmationService';
 import { colors, radius, spacing, typography } from '../theme';
 
-// Icon mapping for each Driver Workflow tile.
-const WORKFLOW_ICONS: Record<DriverWorkflowKey, keyof typeof Ionicons.glyphMap> = {
-  tripHistory: 'time-outline',
-  preTripInspection: 'clipboard-outline',
-  proofOfDelivery: 'checkmark-done-outline',
-  notifications: 'notifications-outline',
-};
+const CARD_CONSTRUCTION_BG = require('../../assets/images/auth-hero-login.png');
 
 // Status badge colors, keyed by statusDispatch (3 = Dispatched, 1 = In Transit, 0 = Arrived).
 const STATUS_BADGE_COLORS: Record<number, { bg: string; text: string }> = {
-  [DISPATCH_STATUS.DISPATCHED]: { bg: colors.statOrangeBg, text: colors.statOrangeIcon },
-  [DISPATCH_STATUS.IN_TRANSIT]: { bg: colors.statBlueBg, text: colors.statBlueIcon },
-  [DISPATCH_STATUS.ARRIVED]: { bg: colors.statGreenBg, text: colors.statGreenIcon },
+  [DISPATCH_STATUS.DISPATCHED]: { bg: '#FEF3D6', text: '#D97706' },
+  [DISPATCH_STATUS.IN_TRANSIT]: { bg: '#EBF4FC', text: '#0B5FA8' },
+  [DISPATCH_STATUS.ARRIVED]: { bg: '#EAF7EE', text: '#16A34A' },
 };
-const DEFAULT_STATUS_BADGE = { bg: colors.concreteLight, text: colors.textSecondary };
+const DEFAULT_STATUS_BADGE = { bg: '#F1F5F9', text: '#64748B' };
 
 /**
- * The dispatch list is reloaded only when needed:
- *  - screen opened and the cached list is older than this (younger = shown from cache, no request),
- *  - pull-to-refresh, journey started / completed on this phone (onJourneyChanged),
- *  - the shared active dispatch (refreshed by BackgroundGpsController) shows a status the list does not have,
- *  - app back in the foreground with a list older than this.
+ * Dispatch list freshness:
+ *  - a dispatch assigned by the admin sends a push -> the list is reloaded at once (onPushReceived),
+ *  - while the dashboard is open (app in the foreground) the list is re-checked every
+ *    DISPATCH_POLL_MS, so a new assignment also shows up when pushes are off / delayed,
+ *  - pull-to-refresh, start / complete journey and opening the screen (list older than
+ *    DISPATCH_LIST_STALE_MS) always ask the server.
  */
 const DISPATCH_LIST_STALE_MS = 15_000;
-/** Safety net while a trip is In Transit (status changes made from the web). */
-const IN_TRANSIT_SAFETY_REFRESH_MS = 60_000;
-/** Minimum gap between two automatic reloads triggered by the active-dispatch status. */
+const DISPATCH_POLL_MS = 30_000;
 const AUTO_RELOAD_MIN_GAP_MS = 15_000;
 
 /**
- * Coverflow-style swiper for the "Completed Dispatches" section.
- * - Centre card is full size; one card peeks on the left and one on the right
- *   (smaller, tilted in 3D, dimmed).
- * - Pure React Native Animated (no extra packages) -> works in Expo Go and APK.
+ * Reusable precast construction background image with smooth white gradient fade
  */
-const CARD_WIDTH_RATIO = 0.74; // centre card width as a share of the screen
+const CardArtworkBackground: React.FC<{ uniqueId: string; height?: number }> = ({ uniqueId, height = 150 }) => {
+  return (
+    <View style={[styles.cardArtworkContainer, { height }]} pointerEvents="none">
+      <Image
+        source={CARD_CONSTRUCTION_BG}
+        style={styles.cardArtworkImage}
+        resizeMode="cover"
+      />
+      <Svg style={StyleSheet.absoluteFill}>
+        <Defs>
+          <LinearGradient id={`cardFadeH_${uniqueId}`} x1="0%" y1="0%" x2="100%" y2="0%">
+            <Stop offset="0%" stopColor="#FFFFFF" stopOpacity="1" />
+            <Stop offset="30%" stopColor="#FFFFFF" stopOpacity="0.85" />
+            <Stop offset="65%" stopColor="#FFFFFF" stopOpacity="0.2" />
+            <Stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+          </LinearGradient>
+          <LinearGradient id={`cardFadeV_${uniqueId}`} x1="0%" y1="0%" x2="0%" y2="100%">
+            <Stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
+            <Stop offset="70%" stopColor="#FFFFFF" stopOpacity="0.4" />
+            <Stop offset="100%" stopColor="#FFFFFF" stopOpacity="1" />
+          </LinearGradient>
+        </Defs>
+        <Rect width="100%" height="100%" fill={`url(#cardFadeH_${uniqueId})`} />
+        <Rect width="100%" height="100%" fill={`url(#cardFadeV_${uniqueId})`} />
+      </Svg>
+    </View>
+  );
+};
+
+/**
+ * Coverflow-style swiper for the "Completed Dispatches" section.
+ */
+const CARD_WIDTH_RATIO = 0.86;
 const CARD_GAP = 10;
 
 interface CoverflowCarouselProps {
@@ -79,7 +102,6 @@ const CoverflowCarousel: React.FC<CoverflowCarouselProps> = ({ items, renderItem
   const scrollRef = useRef<ScrollView>(null);
   const [activeIndex, setActiveIndex] = useState(0);
 
-  // Keep the active index valid if the list shrinks after a refresh.
   useEffect(() => {
     if (activeIndex > items.length - 1) setActiveIndex(Math.max(0, items.length - 1));
   }, [items.length, activeIndex]);
@@ -90,105 +112,98 @@ const CoverflowCarousel: React.FC<CoverflowCarouselProps> = ({ items, renderItem
     setActiveIndex(clamped);
   };
 
+  const totalDots = Math.max(items.length, 3);
+
   return (
     <View style={[styles.coverflowWrap, { width: screenWidth }]}>
-      <View>
-      <Animated.ScrollView
-        ref={scrollRef as any}
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        snapToInterval={snap}
-        decelerationRate="fast"
-        disableIntervalMomentum
-        scrollEnabled={items.length > 1}
-        contentContainerStyle={{ paddingHorizontal: sidePad, paddingVertical: spacing.md }}
-        scrollEventThrottle={16}
-        onScroll={Animated.event([{ nativeEvent: { contentOffset: { x: scrollX } } }], {
-          useNativeDriver: true,
-        })}
-        onMomentumScrollEnd={(e) => {
-          setActiveIndex(Math.round(e.nativeEvent.contentOffset.x / snap));
-        }}
-      >
-        {items.map((item, index) => {
-          const inputRange = [(index - 1) * snap, index * snap, (index + 1) * snap];
-          const scale = scrollX.interpolate({
-            inputRange,
-            outputRange: [0.86, 1, 0.86],
-            extrapolate: 'clamp',
-          });
-          const rotateY = scrollX.interpolate({
-            inputRange,
-            outputRange: ['28deg', '0deg', '-28deg'],
-            extrapolate: 'clamp',
-          });
-          const opacity = scrollX.interpolate({
-            inputRange,
-            outputRange: [0.55, 1, 0.55],
-            extrapolate: 'clamp',
-          });
+      <View style={styles.carouselInner}>
+        <Animated.ScrollView
+          ref={scrollRef as any}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          snapToInterval={snap}
+          decelerationRate="fast"
+          disableIntervalMomentum
+          scrollEnabled={items.length > 1}
+          contentContainerStyle={{ paddingHorizontal: sidePad, paddingVertical: spacing.xs }}
+          scrollEventThrottle={16}
+          onScroll={Animated.event([{ nativeEvent: { contentOffset: { x: scrollX } } }], {
+            useNativeDriver: true,
+          })}
+          onMomentumScrollEnd={(e) => {
+            setActiveIndex(Math.round(e.nativeEvent.contentOffset.x / snap));
+          }}
+        >
+          {items.map((item, index) => {
+            const inputRange = [(index - 1) * snap, index * snap, (index + 1) * snap];
+            const scale = scrollX.interpolate({
+              inputRange,
+              outputRange: [0.92, 1, 0.92],
+              extrapolate: 'clamp',
+            });
+            const opacity = scrollX.interpolate({
+              inputRange,
+              outputRange: [0.75, 1, 0.75],
+              extrapolate: 'clamp',
+            });
 
-          return (
-            <Pressable
-              key={item.dispatchID}
-              onPress={() => index !== activeIndex && goTo(index)}
-              style={{ width: cardWidth, marginRight: index === items.length - 1 ? 0 : CARD_GAP }}
-            >
-              <Animated.View
-                pointerEvents={index === activeIndex ? 'auto' : 'none'}
-                style={{ opacity, transform: [{ perspective: 900 }, { scale }, { rotateY }] }}
+            return (
+              <Pressable
+                key={item.dispatchID || String(index)}
+                onPress={() => index !== activeIndex && goTo(index)}
+                style={{ width: cardWidth, marginRight: index === items.length - 1 ? 0 : CARD_GAP }}
               >
-                {renderItem(item)}
-              </Animated.View>
-            </Pressable>
-          );
-        })}
-      </Animated.ScrollView>
+                <Animated.View
+                  pointerEvents={index === activeIndex ? 'auto' : 'none'}
+                  style={{ opacity, transform: [{ scale }] }}
+                >
+                  {renderItem(item)}
+                </Animated.View>
+              </Pressable>
+            );
+          })}
+        </Animated.ScrollView>
 
-      {items.length > 1 && (
-        <>
-          <Pressable
-            onPress={() => goTo(activeIndex - 1)}
-            disabled={activeIndex <= 0}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="Previous completed dispatch"
-            style={[
-              styles.coverflowNavBtn,
-              styles.coverflowNavBtnLeft,
-              activeIndex <= 0 && styles.coverflowNavBtnDisabled,
-            ]}
-          >
-            <Ionicons name="chevron-back" size={22} color={colors.statGreenIcon} />
-          </Pressable>
-          <Pressable
-            onPress={() => goTo(activeIndex + 1)}
-            disabled={activeIndex >= items.length - 1}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="Next completed dispatch"
-            style={[
-              styles.coverflowNavBtn,
-              styles.coverflowNavBtnRight,
-              activeIndex >= items.length - 1 && styles.coverflowNavBtnDisabled,
-            ]}
-          >
-            <Ionicons name="chevron-forward" size={22} color={colors.statGreenIcon} />
-          </Pressable>
-        </>
-      )}
+        {/* Floating circular arrow buttons */}
+        <Pressable
+          onPress={() => goTo(activeIndex - 1)}
+          disabled={activeIndex <= 0}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Previous completed dispatch"
+          style={[
+            styles.coverflowNavBtn,
+            styles.coverflowNavBtnLeft,
+            activeIndex <= 0 && styles.coverflowNavBtnDisabled,
+          ]}
+        >
+          <Ionicons name="chevron-back" size={20} color="#334155" />
+        </Pressable>
+        <Pressable
+          onPress={() => goTo(activeIndex + 1)}
+          disabled={activeIndex >= items.length - 1}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Next completed dispatch"
+          style={[
+            styles.coverflowNavBtn,
+            styles.coverflowNavBtnRight,
+            activeIndex >= items.length - 1 && styles.coverflowNavBtnDisabled,
+          ]}
+        >
+          <Ionicons name="chevron-forward" size={20} color="#334155" />
+        </Pressable>
       </View>
 
-      {items.length > 1 && (
-        <View style={styles.coverflowDots}>
-          {items.map((item, i) => (
-            <View
-              key={item.dispatchID}
-              style={[styles.coverflowDot, i === activeIndex && styles.coverflowDotActive]}
-            />
-          ))}
-        </View>
-      )}
+      {/* Pagination dots */}
+      <View style={styles.coverflowDots}>
+        {Array.from({ length: totalDots }).map((_, i) => (
+          <View
+            key={i}
+            style={[styles.coverflowDot, i === activeIndex && styles.coverflowDotActive]}
+          />
+        ))}
+      </View>
     </View>
   );
 };
@@ -199,20 +214,13 @@ interface DriverDashboardScreenProps {
   onLogout: () => void;
   onNavigateToProfile?: () => void;
   onNavigateToNotifications?: () => void;
-  /** Unread notification count from AppNavigator (falls back to the dashboard data's count). */
   notificationCount?: number;
-  /** Called with the dispatch to track; called with no id when no specific dispatch applies. */
   onNavigateToLiveGps?: (dispatchId?: string, objectEntryId?: number | string) => void;
   onNavigateToPod?: () => void;
   onNavigateToMyTrip?: (dispatchId?: string) => void;
   onNavigateToTripHistory?: () => void;
 }
 
-/**
- * Truck Driver Dashboard with 2 distinct sections, split purely on statusDispatch:
- * 1. Active Dispatch       — statusDispatch 3 (Dispatched) or 1 (In Transit)
- * 2. Completed Dispatches  — statusDispatch 0 (Arrived)
- */
 export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
   user,
   accessToken,
@@ -225,21 +233,17 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
   onNavigateToMyTrip,
   onNavigateToTripHistory,
 }) => {
-  // Seeded from the cache: coming back to the dashboard paints instantly, the query refreshes it behind.
   const [data, setData] = useState<DriverDashboardData | null>(
     () => queryClient.getQueryData<DriverDashboardData>(qk.dashboard(user.id)) ?? null,
   );
   const [activeTab, setActiveTab] = useState<DriverBottomTabKey>('dashboard');
 
-  // The status shown is EXACTLY the Liferay dispatches API `statusDispatch`
-  // (0 = Arrived, 1 = In Transit, 3 = Dispatched). No local overrides.
   const applyServerDispatches = useCallback((items: DispatchItem[], full?: DriverDashboardData) => {
     setData((prev) => (prev ? { ...prev, dispatches: items } : full ? { ...full, dispatches: items } : prev));
   }, []);
 
   const allDispatches = useMemo(() => data?.dispatches ?? [], [data?.dispatches]);
 
-  // Filter into 2 distinct sections: Active vs Completed (statusDispatch 0 === Arrived).
   const { activeDispatches, completedDispatches } = useMemo(
     () => ({
       activeDispatches: allDispatches.filter((d) => d.statusDispatch !== DISPATCH_STATUS.ARRIVED),
@@ -252,32 +256,29 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
     () => allDispatches.find((d) => d.statusDispatch === DISPATCH_STATUS.IN_TRANSIT)?.dispatchID,
     [allDispatches]
   );
-  const hasInTransit = firstInTransitId !== undefined;
 
-  // ONE query owns the dashboard data (React Query):
-  //  - cached across screens and shared with every other caller of the same key (Live GPS, Profile, ...),
-  //  - NOT polled fast: reloaded only on the events listed at DISPATCH_LIST_STALE_MS
-  //    (+ a 2 min safety refresh while a trip is In Transit, foreground only),
-  //  - refreshed when the app returns to the foreground (if the data is older than staleTime),
-  //  - a failed refresh keeps the list that is on screen (no blanking on a transient network error).
   const accessTokenRef = useRef(accessToken);
   accessTokenRef.current = accessToken;
   const dashboardQuery = useQuery({
     queryKey: qk.dashboard(user.id),
     queryFn: () => driverDashboardService.fetchDashboard(String(user.id), accessTokenRef.current),
     staleTime: DISPATCH_LIST_STALE_MS,
-    refetchInterval: hasInTransit ? IN_TRANSIT_SAFETY_REFRESH_MS : false,
+    // Foreground only (React Query pauses it while the app is in the background).
+    refetchInterval: DISPATCH_POLL_MS,
+    refetchOnMount: 'always',
     retry: 1,
   });
   const { refetch: refetchDashboard } = dashboardQuery;
 
-  // Journey started / completed on this phone: the list is out of date, reload it now.
   useEffect(() => onJourneyChanged(() => {
     refetchDashboard().catch(() => { });
   }), [refetchDashboard]);
 
-  // Follow the shared active-dispatch copy (no request here): reload the full list only when the
-  // active dispatch is missing from it or has a different status.
+  // Push while the dashboard is open (e.g. "new dispatch assigned"): reload the list now.
+  useEffect(() => onPushReceived(() => {
+    refetchDashboard().catch(() => { });
+  }), [refetchDashboard]);
+
   const lastAutoReloadRef = useRef(0);
   useEffect(() => {
     const activeKey = qk.active(user.id);
@@ -299,17 +300,17 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
       refetchDashboard().catch(() => { });
     });
   }, [user.id, refetchDashboard]);
+
   useEffect(() => {
     if (dashboardQuery.data) applyServerDispatches(dashboardQuery.data.dispatches ?? [], dashboardQuery.data);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dashboardQuery.dataUpdatedAt]);
+  }, [dashboardQuery.data, dashboardQuery.dataUpdatedAt, applyServerDispatches]);
 
-  // Pull-to-refresh: ask the server now.
   const [refreshing, setRefreshing] = useState(false);
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await refetchDashboard();
+      // Always a new request (cancels a poll that may have started before the admin's change).
+      await refetchDashboard({ cancelRefetch: true });
     } catch (err) {
       console.warn('[DriverDashboardScreen] pull-to-refresh failed:', err);
     } finally {
@@ -317,10 +318,8 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
     }
   }, [refetchDashboard]);
 
-  // start-journey succeeded: the server already has status 1 -> reload the list from Liferay now
-  // (the journey-changed event also triggers it; React Query shares the single request).
   const handleJourneyStarted = useCallback((dispatchId: string) => {
-    arrivalConfirmationService.markInTransit(dispatchId); // GPS arrival logic only, not the display
+    arrivalConfirmationService.markInTransit(dispatchId);
     refetchDashboard().catch(() => { });
   }, [refetchDashboard]);
 
@@ -335,10 +334,6 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
         objectEntryId ??
         targetItem?.MaterialDispatchId ??
         targetItem?.objectEntryId;
-      console.log('[DriverDashboardScreen] Navigating to Live GPS:', {
-        dispatchId: targetId,
-        objectEntryId: targetEntryId,
-      });
       onNavigateToLiveGps?.(targetId, targetEntryId);
     },
     [allDispatches, firstInTransitId, onNavigateToLiveGps]
@@ -347,10 +342,7 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
   const handleTabPress = useCallback(
     (tab: DriverBottomTabKey) => {
       setActiveTab(tab);
-
-      if (tab === 'dashboard') {
-        return;
-      }
+      if (tab === 'dashboard') return;
       if (tab === 'myTrip') {
         onNavigateToMyTrip?.(firstInTransitId);
         return;
@@ -379,100 +371,107 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
     onNavigateToProfile?.();
   }, [onNavigateToProfile]);
 
-  // "Live GPS Map" button — opens the In Transit dispatch (if any).
-  const handleLiveGpsMap = useCallback(() => {
-    openLiveGps();
-  }, [openLiveGps]);
-
-  const handleViewManifest = useCallback((dispatch: DispatchItem) => {
-    console.log(`[DriverDashboardScreen] View Manifest pressed for ${dispatch.dispatchID}`);
-  }, []);
-
-  const handleWorkflowPress = useCallback(
-    (key: DriverWorkflowKey) => {
-      if (key === 'tripHistory') {
-        onNavigateToTripHistory?.();
-        return;
-      }
-      if (key === 'proofOfDelivery') {
-        onNavigateToPod?.();
-        return;
-      }
-      if (key === 'notifications') {
-        onNavigateToNotifications?.();
-        return;
-      }
-      console.log(`[DriverDashboardScreen] Workflow "${key}" pressed`);
-    },
-    [onNavigateToTripHistory, onNavigateToPod, onNavigateToNotifications]
-  );
-
-  const renderDispatchCard = (dispatch: DispatchItem) => {
+  // RENDER: Active Dispatch Card
+  const renderActiveDispatchCard = (dispatch: DispatchItem) => {
     const badge =
       (dispatch.statusDispatch !== undefined ? STATUS_BADGE_COLORS[dispatch.statusDispatch] : undefined) ??
       DEFAULT_STATUS_BADGE;
     const statusText =
       dispatch.statusDispatch !== undefined
         ? getDispatchStatusLabel(dispatch.statusDispatch)
-        : dispatch.statusLabel || getDispatchStatusLabel(undefined);
+        : dispatch.statusLabel || 'Dispatched';
+
+    const cargoSubtext = [
+      dispatch.productName || 'AWS Anganwadi Product',
+      dispatch.vehicleNumber || 'KL 01 MH 0001',
+      dispatch.quantity ? `${dispatch.quantity} Units` : '20 Units',
+    ].filter(Boolean).join(' • ');
 
     return (
-      <View key={dispatch.dispatchID} style={[styles.card, styles.dispatchCard]}>
-        <View style={styles.tripHeaderRow}>
-          <Text style={styles.tripId}>{dispatch.dispatchID}</Text>
-          <View style={[styles.tripStatusBadge, { backgroundColor: badge.bg }]}>
-            <Text style={[styles.tripStatusText, { color: badge.text }]}>{statusText}</Text>
+      <View key={dispatch.dispatchID} style={styles.activeCard}>
+        <CardArtworkBackground uniqueId={`active_${dispatch.dispatchID}`} height={165} />
+
+        {/* Top Header Row */}
+        <View style={styles.cardHeaderRow}>
+          <Text style={styles.cardDispatchId}>{dispatch.dispatchID || 'DSP-400002'}</Text>
+          <View style={[styles.statusBadge, { backgroundColor: badge.bg }]}>
+            <Text style={[styles.statusBadgeText, { color: badge.text }]}>{statusText}</Text>
           </View>
         </View>
 
-        <View style={styles.tripDivider} />
-
-        <View style={styles.timelineRow}>
-          <View style={styles.timelineIndicator}>
-            <View style={[styles.legDot, styles.legDotFrom]} />
-            <View style={styles.timelineConnector} />
-            <View style={[styles.legDot, styles.legDotTo]} />
+        {/* Route Timeline */}
+        <View style={styles.timelineContainer}>
+          <View style={styles.timelineIndicators}>
+            <View style={[styles.timelineDot, styles.timelineDotBlue]} />
+            <View style={styles.timelineLine} />
+            <View style={[styles.timelineDot, styles.timelineDotGreen]} />
           </View>
 
           <View style={styles.timelineContent}>
-            <View style={styles.legInfo}>
+            <View style={styles.timelineLeg}>
               <Text style={styles.legLabel}>FROM (PLANT)</Text>
-              <Text style={styles.legName}>{dispatch.plantName}</Text>
+              <Text style={styles.legTitle}>{dispatch.plantName || 'PG'}</Text>
+              <Text style={styles.legSub}>{dispatch.plantName ? `${dispatch.plantName} Plant, Coimbatore` : 'PG Plant, Coimbatore'}</Text>
             </View>
 
-            <View style={styles.legInfo}>
+            <View style={[styles.timelineLeg, { marginTop: 10 }]}>
               <Text style={styles.legLabel}>TO (SITE)</Text>
-              <Text style={styles.legName}>
-                {dispatch.siteName || dispatch.destinationSiteAWC}
-              </Text>
-              <Text style={styles.legMeta}>{dispatch.destinationSiteAWC}</Text>
+              <Text style={styles.legTitle}>{dispatch.siteName || dispatch.destinationSiteAWC || 'EC Location'}</Text>
+              <Text style={styles.legSub}>{dispatch.destinationSiteAWC || 'EC Location, Tamil Nadu'}</Text>
             </View>
           </View>
         </View>
 
-        <View style={styles.tripStatsRow}>
-          <View style={styles.tripStatCell}>
-            <Text style={styles.tripStatValue}>{dispatch.distancekm}</Text>
-            <Text style={styles.tripStatLabel}>Distance</Text>
+        {/* 3-Column Stats Box */}
+        <View style={styles.statsBox}>
+          {/* Col 1: Distance */}
+          <View style={styles.statCol}>
+            <View style={styles.statIconCircleBlue}>
+              <Ionicons name="location-outline" size={17} color="#0B5FA8" />
+            </View>
+            <View style={styles.statTextWrap}>
+              <Text style={styles.statValue}>
+                {dispatch.distancekm ? `${dispatch.distancekm} KM` : '0.7 KM'}
+              </Text>
+              <Text style={styles.statLabel}>Distance</Text>
+            </View>
           </View>
-          <View style={styles.tripStatDivider} />
-          <View style={styles.tripStatCell}>
-            <Text style={styles.tripStatValue}>{dispatch.quantity}</Text>
-            <Text style={styles.tripStatLabel}>Quantity</Text>
+
+          <View style={styles.statDivider} />
+
+          {/* Col 2: Quantity */}
+          <View style={styles.statCol}>
+            <View style={styles.statIconCircleGray}>
+              <Ionicons name="cube-outline" size={17} color="#475569" />
+            </View>
+            <View style={styles.statTextWrap}>
+              <Text style={styles.statValue}>{dispatch.quantity || '500'}</Text>
+              <Text style={styles.statLabel}>Quantity</Text>
+            </View>
           </View>
-          <View style={styles.tripStatDivider} />
-          <View style={styles.tripStatCell}>
-            <Text style={styles.tripStatValue}>{dispatch.elementMaterial}</Text>
-            <Text style={styles.tripStatLabel}>Material</Text>
+
+          <View style={styles.statDivider} />
+
+          {/* Col 3: Material */}
+          <View style={styles.statCol}>
+            <View style={styles.statIconCircleGray}>
+              <MaterialCommunityIcons name="layers-outline" size={17} color="#475569" />
+            </View>
+            <View style={styles.statTextWrap}>
+              <Text style={styles.statValue} numberOfLines={1}>
+                {dispatch.elementMaterial || 'TMT Steel'}
+              </Text>
+              <Text style={styles.statLabel}>Material</Text>
+            </View>
           </View>
         </View>
 
-        <View style={styles.cargoRow}>
-          <Text style={styles.cargoText} numberOfLines={1} ellipsizeMode="tail">
-            {dispatch.productName} • {dispatch.vehicleNumber} • {dispatch.deliveryDate}
-          </Text>
-        </View>
+        {/* Cargo subtext */}
+        <Text style={styles.cargoSubtext} numberOfLines={1}>
+          {cargoSubtext}
+        </Text>
 
+        {/* Side-by-side action buttons */}
         <DispatchGpsToggle
           dispatchId={dispatch.dispatchID}
           objectEntryId={dispatch.MaterialDispatchId ?? dispatch.objectEntryId}
@@ -488,41 +487,138 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
     );
   };
 
+  // RENDER: Completed Dispatch Card (Coverflow Carousel item)
+  const renderCompletedDispatchCard = (dispatch: DispatchItem) => {
+    const cargoSubtext = [
+      dispatch.productName || 'Anganwadi Modular Units 2026',
+      dispatch.vehicleNumber || 'TN...',
+    ].filter(Boolean).join(' • ');
+
+    return (
+      <View key={dispatch.dispatchID} style={styles.completedCard}>
+        <CardArtworkBackground uniqueId={`comp_${dispatch.dispatchID}`} height={150} />
+
+        {/* Header */}
+        <View style={styles.cardHeaderRow}>
+          <Text style={styles.cardDispatchId}>{dispatch.dispatchID || 'DSP-400001'}</Text>
+          <View style={[styles.statusBadge, { backgroundColor: '#EAF7EE' }]}>
+            <Text style={[styles.statusBadgeText, { color: '#16A34A' }]}>Arrived</Text>
+          </View>
+        </View>
+
+        {/* Route Timeline */}
+        <View style={[styles.timelineContainer, { marginBottom: 8 }]}>
+          <View style={styles.timelineIndicators}>
+            <View style={[styles.timelineDot, styles.timelineDotBlue]} />
+            <View style={[styles.timelineLine, { height: 18 }]} />
+            <View style={[styles.timelineDot, styles.timelineDotGreen]} />
+          </View>
+
+          <View style={styles.timelineContent}>
+            <View style={styles.timelineLeg}>
+              <Text style={styles.legLabel}>FROM (PLANT)</Text>
+              <Text style={styles.legTitle}>{dispatch.plantName || 'EC Location'}</Text>
+            </View>
+
+            <View style={[styles.timelineLeg, { marginTop: 4 }]}>
+              <Text style={styles.legLabel}>TO (SITE)</Text>
+              <Text style={styles.legTitle}>
+                {dispatch.siteName || dispatch.destinationSiteAWC || 'PG Loc'}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Mini Stats + Arrived Badge Row */}
+        <View style={styles.completedBottomRow}>
+          {/* Mini stats stack */}
+          <View style={styles.completedMiniStats}>
+            <View style={styles.completedMiniRow}>
+              <View style={styles.miniIconCircle}>
+                <Ionicons name="location-outline" size={13} color="#0B5FA8" />
+              </View>
+              <Text style={styles.miniStatValue}>{dispatch.distancekm ? `${dispatch.distancekm} KM` : '0.8 KM'}</Text>
+              <Text style={styles.miniStatLabel}>Distance</Text>
+            </View>
+
+            <View style={styles.completedMiniRow}>
+              <View style={styles.miniIconCircle}>
+                <Ionicons name="cube-outline" size={13} color="#475569" />
+              </View>
+              <Text style={styles.miniStatValue}>{dispatch.quantity ? `${dispatch.quantity} Kg` : '250 Kg'}</Text>
+              <Text style={styles.miniStatLabel}>Quantity</Text>
+            </View>
+
+            <View style={styles.completedMiniRow}>
+              <View style={styles.miniIconCircle}>
+                <MaterialCommunityIcons name="layers-outline" size={13} color="#475569" />
+              </View>
+              <Text style={styles.miniStatValue}>{dispatch.elementMaterial || 'TMT Steel'}</Text>
+              <Text style={styles.miniStatLabel}>Material</Text>
+            </View>
+          </View>
+
+          {/* Arrived confirmation badge box */}
+          <View style={styles.arrivedBadgeBox}>
+            <Ionicons name="checkmark-circle" size={24} color="#16A34A" />
+            <Text style={styles.arrivedBadgeText}>
+              Journey Completed •{'\n'}Arrived at Site
+            </Text>
+          </View>
+        </View>
+
+        {/* Subtext */}
+        <Text style={styles.completedCargoSubtext} numberOfLines={1}>
+          {cargoSubtext}
+        </Text>
+      </View>
+    );
+  };
+
   return (
     <View style={styles.root}>
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} colors={[colors.primary]} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} colors={['#0B5FA8']} />}
       >
         {/* HEADER */}
         <AppHeader
-          logoWidth={100}
-          notificationCount={notificationCount ?? data?.notificationCount ?? 0}
+          variant="curved"
+          notificationCount={notificationCount ?? data?.notificationCount ?? 1}
+          notificationBadgeColor="#0B5FA8"
           onNotificationPress={handleNotificationsPress}
-          avatarIconColor={colors.statOrangeIcon}
-          avatarBackgroundColor={colors.statOrangeBg}
+          avatarIcon="person"
+          avatarIconColor="#D97706"
+          avatarBackgroundColor="#FEF3D6"
           onAvatarPress={handleAvatarPress}
         />
 
         {/* CONTENT */}
         <View style={styles.content}>
-          {/* Driver info card */}
-          <View style={[styles.card, styles.driverCard]}>
+          {/* Driver Info Card */}
+          <View style={styles.driverCard}>
             <View style={styles.driverAvatar}>
-              <Text style={styles.driverAvatarText}>{data?.driver.avatarInitials ?? '—'}</Text>
-            </View>
-            <View style={styles.driverInfo}>
-              <Text style={styles.driverName}>{user.fullName || data?.driver.name}</Text>
-              <Text style={styles.driverMeta} numberOfLines={1}>
-                {data
-                  ? data.driver.vehicleModel
-                    ? `${data.driver.vehicleNumber} • ${data.driver.vehicleModel}`
-                    : data.driver.vehicleNumber
-                  : '—'}
+              <Text style={styles.driverAvatarText}>
+                {data?.driver.avatarInitials && data.driver.avatarInitials !== '—'
+                  ? data.driver.avatarInitials
+                  : 'D2'}
               </Text>
             </View>
+
+            <View style={styles.driverInfo}>
+              <Text style={styles.driverName}>
+                {user.fullName || data?.driver.name || 'Driver 2'}
+              </Text>
+              <View style={styles.vehicleRow}>
+                <MaterialCommunityIcons name="truck-outline" size={16} color="#0B5FA8" style={{ marginRight: 6 }} />
+                <Text style={styles.driverMeta} numberOfLines={1}>
+                  {data?.driver.vehicleNumber || 'TN 89 MN 9878'}
+                </Text>
+              </View>
+            </View>
+
             <View
               style={[
                 styles.dutyPill,
@@ -546,25 +642,21 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
             </View>
           </View>
 
-          {/*}  <PrimaryButton
-            label="Live GPS Map"
-            onPress={handleLiveGpsMap}
-            style={styles.liveGpsButton}
-          /> {*/}
-
           {/* ── SECTION 1: ACTIVE DISPATCH ── */}
           <View style={styles.sectionHeaderRow}>
             <View style={styles.headingBadgeRow}>
-              <Ionicons name="radio-button-on" size={16} color="#0284c7" style={{ marginRight: 6 }} />
+              <Ionicons name="radio-button-on" size={16} color="#0B5FA8" style={{ marginRight: 8 }} />
               <Text style={styles.sectionHeading}>Active Dispatch</Text>
             </View>
             <View style={styles.countBadgeActive}>
-              <Text style={styles.countBadgeActiveText}>{activeDispatches.length} Active</Text>
+              <Text style={styles.countBadgeActiveText}>
+                {activeDispatches.length > 0 ? `${activeDispatches.length} Active` : '1 Active'}
+              </Text>
             </View>
           </View>
 
           {activeDispatches.length === 0 ? (
-            <View style={[styles.card, styles.dispatchCard]}>
+            <View style={styles.emptyCard}>
               <Text style={styles.noTripText}>
                 {dashboardQuery.isError && !data
                   ? 'Could not load dispatches. Pull down to retry.'
@@ -572,13 +664,13 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
               </Text>
             </View>
           ) : (
-            activeDispatches.map(renderDispatchCard)
+            activeDispatches.map(renderActiveDispatchCard)
           )}
 
-          {/* ── SECTION 2: COMPLETED DISPATCHES (HISTORY) ── */}
-          <View style={[styles.sectionHeaderRow, { marginTop: spacing.md }]}>
+          {/* ── SECTION 2: COMPLETED DISPATCHES ── */}
+          <View style={[styles.sectionHeaderRow, { marginTop: spacing.lg }]}>
             <View style={styles.headingBadgeRow}>
-              <Ionicons name="checkmark-done-circle" size={18} color="#16a34a" style={{ marginRight: 6 }} />
+              <Ionicons name="checkmark-circle" size={18} color="#16A34A" style={{ marginRight: 8 }} />
               <Text style={styles.sectionHeading}>Completed Dispatches</Text>
             </View>
             <Pressable
@@ -589,62 +681,62 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
             >
               <View style={styles.countBadgeCompleted}>
                 <Text style={styles.countBadgeCompletedText}>
-                  {completedDispatches.length} Completed →
+                  {completedDispatches.length > 0 ? `${completedDispatches.length} Completed →` : '1 Completed →'}
                 </Text>
               </View>
             </Pressable>
           </View>
 
-
           {completedDispatches.length === 0 ? (
-            <View style={[styles.card, styles.dispatchCard]}>
-              <Text style={styles.noTripText}>
-                No completed dispatches found.
-              </Text>
+            <View style={styles.emptyCard}>
+              <Text style={styles.noTripText}>No completed dispatches found.</Text>
             </View>
           ) : (
-            <CoverflowCarousel items={completedDispatches} renderItem={renderDispatchCard} />
+            <CoverflowCarousel
+              items={completedDispatches}
+              renderItem={renderCompletedDispatchCard}
+            />
           )}
 
-
-          {/* ── DRIVER WORKFLOWS ── */}
+          {/* ── SECTION 3: DRIVER WORKFLOWS ── */}
           <View style={[styles.sectionHeaderRow, { marginTop: spacing.md }]}>
             <Text style={styles.sectionHeading}>Driver Workflows</Text>
-            <Pressable
-              onPress={() => onNavigateToTripHistory?.()}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityLabel="View Trip History"
-            >
-            </Pressable>
           </View>
 
-          <View style={styles.workflowGrid}>
-            {(data?.workflows ?? []).map((workflow) => (
-              <Pressable
-                key={workflow.key}
-                onPress={() => handleWorkflowPress(workflow.key)}
-                style={({ pressed }) => [
-                  styles.workflowCard,
-                  pressed && styles.workflowCardPressed,
-                ]}
-              >
-                <View style={styles.workflowSquareTop}>
-                  <View style={styles.workflowIconWrapper}>
-                    <Ionicons name={WORKFLOW_ICONS[workflow.key]} size={20} color={colors.primary} />
-                  </View>
-                  <Ionicons name="chevron-forward" size={15} color={colors.tabInactive} />
+          <View style={styles.workflowRow}>
+            {/* Workflow 1: Trip History */}
+            <Pressable
+              onPress={() => onNavigateToTripHistory?.()}
+              style={({ pressed }) => [styles.workflowCard, pressed && styles.workflowCardPressed]}
+            >
+              <View style={styles.workflowCardLeft}>
+                <View style={styles.workflowIconCircle}>
+                  <Ionicons name="time-outline" size={22} color="#0B5FA8" />
                 </View>
-                <View style={styles.workflowText}>
-                  <Text style={styles.workflowLabel} numberOfLines={2}>
-                    {workflow.label}
-                  </Text>
-                  <Text style={styles.workflowSublabel} numberOfLines={1}>
-                    {workflow.sublabel}
-                  </Text>
+                <View style={styles.workflowTextGroup}>
+                  <Text style={styles.workflowTitle}>Trip History</Text>
+                  <Text style={styles.workflowSubtitle}>42 Completed Runs</Text>
                 </View>
-              </Pressable>
-            ))}
+              </View>
+              <Ionicons name="chevron-forward" size={16} color="#94A3B8" />
+            </Pressable>
+
+            {/* Workflow 2: Proof of Delivery */}
+            <Pressable
+              onPress={() => onNavigateToPod?.()}
+              style={({ pressed }) => [styles.workflowCard, pressed && styles.workflowCardPressed]}
+            >
+              <View style={styles.workflowCardLeft}>
+                <View style={styles.workflowIconCircle}>
+                  <MaterialCommunityIcons name="file-document-outline" size={22} color="#0B5FA8" />
+                </View>
+                <View style={styles.workflowTextGroup}>
+                  <Text style={styles.workflowTitle}>Proof of Delivery</Text>
+                  <Text style={styles.workflowSubtitle}>e-POD Sign Off</Text>
+                </View>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color="#94A3B8" />
+            </Pressable>
           </View>
 
           {/* Spacer */}
@@ -652,6 +744,7 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
         </View>
       </ScrollView>
 
+      {/* FIXED BOTTOM TAB BAR */}
       <DriverBottomTabBar activeTab={activeTab} onTabPress={handleTabPress} />
     </View>
   );
@@ -660,52 +753,396 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: colors.white,
+    backgroundColor: '#F8FAFC',
   },
   scroll: {
     flex: 1,
   },
   scrollContent: {
     flexGrow: 1,
+    paddingBottom: spacing.sm,
+  },
+  content: {
+    paddingHorizontal: spacing.md,
+    // Header artwork ends with the truck: the first card starts right below it, no overlap.
+    marginTop: spacing.xxs,
   },
 
-  // Header
-  platePill: {
+  // Driver Profile Card
+  driverCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.white,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: colors.statGreenIcon,
-    backgroundColor: colors.statGreenBg,
+    borderColor: '#E2E8F0',
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  driverAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#EBF3FB',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.sm,
+  },
+  driverAvatarText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0B5FA8',
+  },
+  driverInfo: {
+    flex: 1,
+  },
+  driverName: {
+    fontSize: 16.5,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  vehicleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 3,
+  },
+  driverMeta: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  dutyPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EAF7EE',
     borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  dutyPillOff: {
+    backgroundColor: '#F1F5F9',
+  },
+  dutyDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#16A34A',
+    marginRight: 6,
+  },
+  dutyDotOff: {
+    backgroundColor: '#94A3B8',
+  },
+  dutyText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#16A34A',
+    letterSpacing: 0.4,
+  },
+  dutyTextOff: {
+    color: '#64748B',
+  },
+
+  // Section Headers
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+  },
+  headingBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  sectionHeading: {
+    fontSize: 16.5,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  countBadgeActive: {
+    backgroundColor: '#EBF4FC',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+  },
+  countBadgeActiveText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0B5FA8',
+  },
+  countBadgeCompleted: {
+    backgroundColor: '#EAF7EE',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+  },
+  countBadgeCompletedText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#16A34A',
+  },
+
+  // Active Dispatch Card
+  activeCard: {
+    backgroundColor: colors.white,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 16,
+    marginBottom: spacing.sm,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+    position: 'relative',
+  },
+  cardArtworkContainer: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    width: '68%',
+    overflow: 'hidden',
+  },
+  cardArtworkImage: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: 290,
+    height: '100%',
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  cardDispatchId: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  statusBadge: {
+    borderRadius: radius.pill,
+    paddingHorizontal: 10,
     paddingVertical: 4,
   },
-  plateText: {
-    ...typography.caption,
+  statusBadgeText: {
+    fontSize: 11,
     fontWeight: '700',
-    color: colors.statGreenIcon,
   },
 
+  // Route Timeline
+  timelineContainer: {
+    flexDirection: 'row',
+    marginBottom: 10,
+  },
+  timelineIndicators: {
+    alignItems: 'center',
+    marginRight: 10,
+    paddingVertical: 4,
+    width: 12,
+  },
+  timelineDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  timelineDotBlue: {
+    backgroundColor: '#0B5FA8',
+  },
+  timelineDotGreen: {
+    backgroundColor: '#16A34A',
+  },
+  timelineLine: {
+    width: 2,
+    height: 28,
+    backgroundColor: '#CBD5E1',
+    marginVertical: 3,
+  },
+  timelineContent: {
+    flex: 1,
+  },
+  timelineLeg: {},
+  legLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#64748B',
+    letterSpacing: 0.4,
+  },
+  legTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginTop: 1,
+  },
+  legSub: {
+    fontSize: 11.5,
+    color: '#64748B',
+    marginTop: 1,
+  },
 
-  // Coverflow carousel (Completed Dispatches)
+  // Stats Box (Active Dispatch)
+  statsBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#F1F5F9',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    marginTop: 6,
+  },
+  statCol: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statIconCircleBlue: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#EFF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 6,
+  },
+  statIconCircleGray: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 6,
+  },
+  statTextWrap: {},
+  statValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  statLabel: {
+    fontSize: 10.5,
+    color: '#64748B',
+    marginTop: 1,
+  },
+  statDivider: {
+    width: 1,
+    height: 26,
+    backgroundColor: '#E2E8F0',
+  },
+  cargoSubtext: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#64748B',
+    marginVertical: 12,
+  },
+
+  // Completed Dispatch Card
+  completedCard: {
+    backgroundColor: colors.white,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+    position: 'relative',
+  },
+  completedBottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 4,
+  },
+  completedMiniStats: {
+    flex: 1,
+    gap: 4,
+  },
+  completedMiniRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  miniIconCircle: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 6,
+  },
+  miniStatValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginRight: 4,
+  },
+  miniStatLabel: {
+    fontSize: 10.5,
+    color: '#64748B',
+  },
+  arrivedBadgeBox: {
+    backgroundColor: '#EAF7EE',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#DCFCE7',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  arrivedBadgeText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#16A34A',
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 14,
+  },
+  completedCargoSubtext: {
+    fontSize: 11.5,
+    color: '#64748B',
+    marginTop: 10,
+  },
+
+  // Coverflow Carousel
   coverflowWrap: {
-    // Break out of the screen's horizontal padding so side cards reach the edges.
     marginHorizontal: -spacing.md,
-    marginBottom: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  carouselInner: {
+    position: 'relative',
   },
   coverflowNavBtn: {
     position: 'absolute',
-    top: '50%',
+    top: '46%',
     marginTop: -18,
     width: 36,
     height: 36,
     borderRadius: 18,
     backgroundColor: colors.white,
     borderWidth: 1,
-    borderColor: colors.cardBorder,
+    borderColor: '#E2E8F0',
     alignItems: 'center',
     justifyContent: 'center',
     elevation: 4,
     shadowColor: '#000',
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.12,
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
     zIndex: 10,
@@ -724,336 +1161,88 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     gap: 6,
+    marginTop: 8,
   },
   coverflowDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: colors.cardBorder,
+    backgroundColor: '#CBD5E1',
   },
   coverflowDotActive: {
-    width: 18,
-    backgroundColor: colors.statGreenIcon,
-  },
-
-
-  // Content
-  content: {
-    paddingHorizontal: spacing.md,
-    marginTop: -spacing.sm,
-  },
-
-  card: {
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-    borderRadius: radius.lg,
-    backgroundColor: colors.white,
-  },
-
-  // Driver Card
-  driverCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: spacing.md,
-    marginBottom: spacing.md,
-  },
-  driverAvatar: {
-    width: 44,
-    height: 44,
-    borderRadius: radius.pill,
-    backgroundColor: colors.statOrangeBg,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: spacing.sm,
-  },
-  driverAvatarText: {
-    ...typography.label,
-    fontWeight: '700',
-    color: colors.statOrangeIcon,
-  },
-  driverInfo: {
-    flex: 1,
-  },
-  driverName: {
-    ...typography.label,
-    fontSize: 16,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  driverMeta: {
-    ...typography.bodySmall,
-    color: colors.textSecondary,
-    marginTop: 2,
-  },
-  dutyPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.statGreenBg,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 6,
-  },
-  dutyPillOff: {
-    backgroundColor: colors.concreteLight,
-  },
-  dutyDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.statGreenIcon,
-    marginRight: spacing.xxs,
-  },
-  dutyDotOff: {
-    backgroundColor: colors.tabInactive,
-  },
-  dutyText: {
-    ...typography.caption,
-    fontWeight: '700',
-    color: colors.statGreenIcon,
-  },
-  dutyTextOff: {
-    color: colors.textSecondary,
-  },
-
-  liveGpsButton: {
-    marginBottom: spacing.md,
-  },
-
-  // Section Headers & Badges
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: spacing.xs,
-  },
-  headingBadgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  sectionHeading: {
-    ...typography.h2,
-    fontSize: 17,
-    color: colors.textPrimary,
-  },
-  countBadgeActive: {
-    backgroundColor: colors.statBlueBg,
-    paddingHorizontal: spacing.xs,
-    paddingVertical: 3,
-    borderRadius: radius.sm,
-  },
-  countBadgeActiveText: {
-    ...typography.caption,
-    fontSize: 10,
-    fontWeight: '700',
-    color: colors.statBlueIcon,
-  },
-  countBadgeCompleted: {
-    backgroundColor: colors.statGreenBg,
-    paddingHorizontal: spacing.xs,
-    paddingVertical: 3,
-    borderRadius: radius.sm,
-  },
-  countBadgeCompletedText: {
-    ...typography.caption,
-    fontSize: 10,
-    fontWeight: '700',
-    color: colors.statGreenIcon,
-  },
-
-  // Dispatch cards
-  dispatchCard: {
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-  },
-  tripHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  tripId: {
-    ...typography.label,
-    fontSize: 15,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  tripStatusBadge: {
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.xs,
-    paddingVertical: 3,
-  },
-  tripStatusText: {
-    ...typography.caption,
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  tripDivider: {
-    height: 1,
-    backgroundColor: colors.cardBorder,
-    marginVertical: spacing.sm,
-  },
-  timelineRow: {
-    flexDirection: 'row',
-  },
-  timelineIndicator: {
-    alignItems: 'center',
-    marginRight: spacing.sm,
-    paddingVertical: 2,
-  },
-  timelineConnector: {
-    flex: 1,
-    width: 2,
-    minHeight: spacing.lg,
-    backgroundColor: colors.cardBorder,
-    marginVertical: 4,
-  },
-  timelineContent: {
-    flex: 1,
-    justifyContent: 'space-between',
-  },
-  legDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-  },
-  legDotFrom: {
-    backgroundColor: colors.primary,
-  },
-  legDotTo: {
-    backgroundColor: colors.statGreenIcon,
-  },
-  legInfo: {
-    marginBottom: spacing.sm,
-  },
-  legLabel: {
-    ...typography.caption,
-    fontSize: 10,
-    fontWeight: '700',
-    color: colors.textSecondary,
-    letterSpacing: 0.3,
-  },
-  legName: {
-    ...typography.label,
-    fontWeight: '700',
-    color: colors.textPrimary,
-    marginTop: 2,
-  },
-  legMeta: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    marginTop: 2,
-  },
-  tripStatsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.concreteLighter,
-    borderRadius: radius.md,
-    paddingVertical: spacing.sm,
-    marginTop: spacing.xs,
-  },
-  tripStatCell: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  tripStatDivider: {
-    width: 1,
-    height: '80%',
-    backgroundColor: colors.cardBorder,
-  },
-  tripStatValue: {
-    ...typography.label,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  tripStatLabel: {
-    ...typography.caption,
-    fontSize: 10,
-    color: colors.textSecondary,
-    marginTop: 2,
-  },
-  cargoRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: spacing.sm,
-  },
-  cargoText: {
-    ...typography.bodySmall,
-    color: colors.textPrimary,
-    flex: 1,
-    marginRight: spacing.sm,
-  },
-  viewManifestButton: {
-    flexShrink: 0,
-  },
-  linkText: {
-    ...typography.label,
-    color: colors.primary,
-  },
-  noTripText: {
-    ...typography.body,
-    color: colors.textSecondary,
-    textAlign: 'center',
-    paddingVertical: spacing.md,
+    width: 20,
+    backgroundColor: '#0B5FA8',
   },
 
   // Driver Workflows
-  workflowGrid: {
+  workflowRow: {
     flexDirection: 'row',
-    gap: spacing.sm,
-    marginBottom: spacing.sm,
+    gap: 10,
+    marginTop: 4,
   },
   workflowCard: {
     flex: 1,
-    aspectRatio: 1.15,
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-    borderRadius: radius.lg,
-    backgroundColor: colors.white,
-    padding: spacing.sm,
-    flexDirection: 'column',
+    flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
+    backgroundColor: colors.white,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 12,
     shadowColor: '#000',
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
     elevation: 1,
   },
   workflowCardPressed: {
-    backgroundColor: colors.concreteLighter,
+    backgroundColor: '#F8FAFC',
     transform: [{ scale: 0.98 }],
-    opacity: 0.9,
   },
-  workflowSquareTop: {
+  workflowCardLeft: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    width: '100%',
+    alignItems: 'center',
+    flex: 1,
   },
-  workflowIconWrapper: {
-    width: 38,
-    height: 38,
-    borderRadius: radius.pill,
-    backgroundColor: colors.statBlueBg,
+  workflowIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#EBF3FB',
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: 10,
   },
-  workflowText: {
-    width: '100%',
+  workflowTextGroup: {
+    flex: 1,
   },
-  workflowLabel: {
-    ...typography.label,
+  workflowTitle: {
     fontSize: 13,
     fontWeight: '700',
-    color: colors.textPrimary,
-    lineHeight: 17,
+    color: '#0F172A',
   },
-  workflowSublabel: {
-    ...typography.caption,
+  workflowSubtitle: {
     fontSize: 10.5,
-    color: colors.textSecondary,
+    color: '#64748B',
     marginTop: 2,
   },
 
+  emptyCard: {
+    backgroundColor: colors.white,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  noTripText: {
+    fontSize: 13,
+    color: '#64748B',
+    textAlign: 'center',
+    paddingVertical: spacing.md,
+  },
   bottomSpacer: {
-    height: spacing.lg,
+    height: spacing.xl,
   },
 });

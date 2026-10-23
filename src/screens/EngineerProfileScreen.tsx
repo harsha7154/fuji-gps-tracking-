@@ -98,14 +98,26 @@ export const EngineerProfileScreen: React.FC<EngineerProfileScreenProps> = ({
         showsVerticalScrollIndicator={false}
       >
         <AppHeader
+          variant="curved"
+          logoWidth={130}
           notificationCount={0}
+          notificationBadgeColor="#0B5FA8"
           onNotificationPress={() => console.log('[EngineerProfileScreen] Notifications pressed.')}
+          avatarIcon="person"
+          avatarIconColor="#D97706"
+          avatarBackgroundColor="#FEF3D6"
           onAvatarPress={() => {}}
         />
 
         <View style={styles.content}>
-          <Pressable onPress={onBack} hitSlop={8} style={styles.backLink}>
-            <Ionicons name="chevron-back" size={16} color={colors.primary} />
+          <Pressable
+            onPress={onBack}
+            hitSlop={8}
+            style={({ pressed }) => [styles.backLink, pressed && styles.backLinkPressed]}
+            accessibilityRole="button"
+            accessibilityLabel="Back to Dashboard"
+          >
+            <Ionicons name="chevron-back" size={16} color="#0B5FA8" />
             <Text style={styles.backLinkText}>Back to Dashboard</Text>
           </Pressable>
 
@@ -201,13 +213,36 @@ const styles = StyleSheet.create({
   scrollContent: { flexGrow: 1 },
   content: { paddingHorizontal: spacing.md },
 
-    backLink: {
+  backLink: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: -spacing.sm,
+    alignSelf: 'flex-start',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    borderRadius: 20,
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    marginTop: spacing.sm,
     marginBottom: spacing.sm,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1.5 },
+    shadowOpacity: 0.07,
+    shadowRadius: 3,
+    elevation: 2,
+    gap: 4,
   },
-  backLinkText: { ...typography.label, color: colors.primary, marginLeft: 2 },
+  backLinkPressed: {
+    opacity: 0.85,
+    transform: [{ scale: 0.97 }],
+    backgroundColor: '#F8FAFC',
+  },
+  backLinkText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0B5FA8',
+    letterSpacing: -0.1,
+  },
 
   title: { ...typography.h2, fontSize: 20, color: colors.textPrimary },
   titleSubtext: {

@@ -354,7 +354,9 @@ export class RouteTracker {
     }
     if (p.ts && p.ts < this.lastTs) return;
     if (p.ts) this.lastTs = p.ts;
-    if ((p.accuracy ?? 0) > MAX_ACCURACY_METERS) return;
+    // Inaccurate fixes must not move the truck, but the FIRST one is still drawn: indoors or
+    // on network location every fix can be > 100 m, and dropping them all hid the truck.
+    if ((p.accuracy ?? 0) > MAX_ACCURACY_METERS && this.pos && this.live) return;
 
     const raw: Pt = { lat: p.lat, lng: p.lng };
     this.live = true;

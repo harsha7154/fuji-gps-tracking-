@@ -51,6 +51,7 @@ export const QuickActionCard: React.FC<QuickActionCardProps> = ({
 const styles = StyleSheet.create({
   card: {
     flexBasis: '30%',
+    flexGrow: 1,
     borderWidth: 1,
     borderColor: colors.cardBorder,
     borderRadius: radius.lg,

@@ -12,6 +12,7 @@ import './src/tasks/backgroundNotificationTask';
 import './src/tasks/backgroundGpsTask';
 import { configureNotificationPresentation } from './src/services/systemNotifications';
 import { AppNavigator } from './src/navigation/AppNavigator';
+import { StatusBarBackdrop } from './src/components/StatusBarBackdrop';
 
 configureNotificationPresentation();
 
@@ -47,6 +48,8 @@ export default function App() {
         <SafeAreaProvider>
           <StatusBar style="dark" />
           <AppNavigator />
+          {/* Keeps the status-bar icons readable on every screen (content scrolls under it). */}
+          <StatusBarBackdrop />
         </SafeAreaProvider>
       </QueryClientProvider>
     </GestureHandlerRootView>

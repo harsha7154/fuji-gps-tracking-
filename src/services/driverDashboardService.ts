@@ -130,6 +130,9 @@ async function fetchDispatchPage(
       method: 'GET',
       headers: {
         Accept: 'application/json',
+        // Never served from an HTTP cache: a dispatch assigned a moment ago must show up.
+        'Cache-Control': 'no-cache',
+        Pragma: 'no-cache',
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       },
     }, REQUEST_TIMEOUT_MS);

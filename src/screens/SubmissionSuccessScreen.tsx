@@ -45,10 +45,14 @@ export default function SubmissionSuccessScreen({
         >
           {/* Header with Curve Background */}
           <AppHeader
+            variant="curved"
+            logoWidth={130}
             notificationCount={0}
+            notificationBadgeColor="#0B5FA8"
             onNotificationPress={() => console.log('[SubmissionSuccess] Notifications pressed')}
-            avatarIconColor="#0056A6"
-            avatarBackgroundColor="#EBF3FA"
+            avatarIcon="person"
+            avatarIconColor="#D97706"
+            avatarBackgroundColor="#FEF3D6"
             onAvatarPress={() => onNavigateToProfile?.()}
           />
 

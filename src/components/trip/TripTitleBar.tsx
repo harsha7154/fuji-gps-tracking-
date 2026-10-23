@@ -28,7 +28,8 @@ export const TripTitleBar: React.FC<TripTitleBarProps> = ({
 
   return (
     <View style={styles.container}>
-      {/* Back button */}
+      {/* Back button (left out when the page header already has "< Back to …") */}
+      {onBack ? (
       <Pressable
         onPress={onBack}
         style={({ pressed }) => [styles.backButton, pressed && styles.pressedState]}
@@ -36,8 +37,9 @@ export const TripTitleBar: React.FC<TripTitleBarProps> = ({
         accessibilityLabel="Go Back"
         hitSlop={8}
       >
-        <Ionicons name="chevron-back" size={18} color="#172033" />
+        <Ionicons name="chevron-back" size={20} color="#0B5FA8" />
       </Pressable>
+      ) : null}
 
       {/* Title & Subtitle */}
       <View style={styles.titleColumn}>
@@ -72,15 +74,20 @@ const styles = StyleSheet.create({
     borderBottomColor: '#F1F5F9',
   },
   backButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
     borderColor: '#E2E8F0',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1.5 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 2,
   },
   titleColumn: {
     flex: 1,
@@ -112,6 +119,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
   },
   pressedState: {
-    opacity: 0.7,
+    opacity: 0.85,
+    transform: [{ scale: 0.94 }],
+    backgroundColor: '#F8FAFC',
   },
 });
