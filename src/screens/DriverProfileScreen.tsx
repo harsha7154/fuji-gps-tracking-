@@ -677,8 +677,8 @@ const CARD_SHADOW = {
 } as const;
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: HERO_PAGE_BACKGROUND },
-  scroll: { flex: 1 },
+  root: { flex: 1, backgroundColor: '#FFFFFF' },
+  scroll: { flex: 1, backgroundColor: '#FFFFFF' },
   scrollContent: { flexGrow: 1 },
   content: { paddingHorizontal: spacing.md },
   flex1: { flex: 1 },

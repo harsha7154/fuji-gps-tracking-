@@ -96,6 +96,25 @@ interface AppHeaderProps {
 // Design height of the header artwork with NO status-bar inset added
 const CURVED_HEADER_BASE_HEIGHT = 145;
 
+const resolveBgAsset = () => {
+  if (typeof Image.resolveAssetSource === 'function') {
+    try {
+      return Image.resolveAssetSource(HEADER_CURVE_BG);
+    } catch {
+      return null;
+    }
+  }
+  if (HEADER_CURVE_BG && typeof HEADER_CURVE_BG === 'object') {
+    return HEADER_CURVE_BG as { width?: number; height?: number };
+  }
+  return null;
+};
+
+const BG_ASSET = resolveBgAsset();
+const ASSET_WIDTH = BG_ASSET?.width && BG_ASSET.width > 0 ? BG_ASSET.width : 1200;
+const ASSET_HEIGHT = BG_ASSET?.height && BG_ASSET.height > 0 ? BG_ASSET.height : 360;
+const ASSET_RATIO = ASSET_WIDTH / ASSET_HEIGHT;
+
 export const AppHeader: React.FC<AppHeaderProps> = ({
   variant = 'photo',
   logoWidth,
@@ -121,8 +140,14 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
   const { width: screenWidth } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const topInset = safeArea ? insets.top : 0;
-  const artHeight = Math.max(128, Math.round(screenWidth * 0.36));
-  const totalHeight = artHeight + topInset;
+  
+  // Exact native uncropped height so the full curve from left to right edge fits without horizontal cropping:
+  const artHeight = Math.round(screenWidth / ASSET_RATIO);
+  
+  // Container height: wraps the status-bar inset plus the curve area, trimming redundant bottom white space
+  // so the first content card sits neatly under the wave.
+  const headerHeight = topInset + Math.round(artHeight * 0.86);
+  const topPadding = topInset + Math.max(8, Math.round(artHeight * 0.08));
   const buttonSize = avatarSize || 40;
 
   // Normalized colors matching the attached UI design:
@@ -146,28 +171,53 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
       : avatarIconColor;
 
   const resolvedLogoWidth =
-    logoWidth ?? Math.min(screenWidth * 0.38, 140);
+    logoWidth ?? Math.min(screenWidth * 0.36, 135);
 
   if (variant === 'photo' || variant === 'hero' || variant === 'curved' || !variant) {
     return (
       <>
-        <View style={[styles.photoHeader, { height: totalHeight, paddingTop: topInset }, style]}>
+        <View style={[styles.photoHeader, { height: headerHeight }, style]}>
+          {/* Concrete background strip behind the status bar */}
+          {topInset > 0 ? (
+            <View
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                height: topInset,
+                backgroundColor: '#D8D7D8',
+              }}
+            />
+          ) : null}
+
+          {/* Full-width uncropped curve artwork */}
           <Image
             source={HEADER_CURVE_BG}
-            style={{ width: screenWidth, height: totalHeight, position: 'absolute', top: 0, left: 0 }}
-            resizeMode="cover"
+            style={{
+              position: 'absolute',
+              top: topInset,
+              left: 0,
+              width: screenWidth,
+              height: artHeight,
+            }}
+            resizeMode="stretch"
             accessible={false}
           />
+
+          {/* Fuji Silvertech Logo */}
           <AppLogo
             width={resolvedLogoWidth}
-            style={{ position: 'absolute', left: 16, top: topInset + 10 }}
+            style={{ position: 'absolute', left: 16, top: topPadding }}
           />
+
+          {/* Action buttons (Notification bell & Profile avatar) */}
           <View
             style={[
               styles.photoActions,
               {
                 right: 16,
-                top: topInset + 10,
+                top: topPadding,
                 gap: 10,
               },
               contentStyle,
@@ -319,7 +369,7 @@ const styles = StyleSheet.create({
 
   photoHeader: {
     width: '100%',
-    backgroundColor: 'transparent',
+    backgroundColor: '#FFFFFF',
     overflow: 'hidden',
   },
   backRow: {

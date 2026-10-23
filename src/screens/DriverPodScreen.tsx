@@ -480,8 +480,8 @@ export const DriverPodScreen: React.FC<DriverPodScreenProps> = ({
 };
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.concreteLighter },
-  scroll: { flex: 1 },
+  root: { flex: 1, backgroundColor: '#FFFFFF' },
+  scroll: { flex: 1, backgroundColor: '#FFFFFF' },
   scrollContent: { paddingBottom: 80 },
   content: { padding: spacing.md, gap: spacing.sm },
 

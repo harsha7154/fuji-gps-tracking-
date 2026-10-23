@@ -1060,7 +1060,7 @@ export const NotificationsScreen: React.FC<
 const styles = StyleSheet.create({
     root: {
         flex: 1,
-        backgroundColor: colors.concreteLighter,
+        backgroundColor: '#FFFFFF',
     },
 
     // Header

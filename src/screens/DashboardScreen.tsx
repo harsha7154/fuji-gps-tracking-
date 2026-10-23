@@ -260,7 +260,7 @@ const styles = StyleSheet.create({
 
   content: {
     paddingHorizontal: spacing.md,
-    marginTop: -spacing.lg,
+    marginTop: 8,
   },
 
   greeting: { ...typography.h1, color: colors.textPrimary },

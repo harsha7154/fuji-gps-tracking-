@@ -367,10 +367,11 @@ export const DriverTripHistoryScreen: React.FC<DriverTripHistoryScreenProps> = (
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#F3F5F7',
+    backgroundColor: '#FFFFFF',
   },
   scrollView: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   scrollContent: {
     flexGrow: 1,

@@ -753,10 +753,11 @@ export const DriverDashboardScreen: React.FC<DriverDashboardScreenProps> = ({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#FFFFFF',
   },
   scroll: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   scrollContent: {
     flexGrow: 1,
@@ -764,8 +765,7 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: spacing.md,
-    // Header artwork ends with the truck: the first card starts right below it, no overlap.
-    marginTop: spacing.xxs,
+    marginTop: 4,
   },
 
   // Driver Profile Card
